@@ -55,6 +55,7 @@ export default function GameClient() {
 
   const [state, setState] = useState<GameState>(() => loadState());
   const stateRef = useRef<GameState>(state);
+
   const pointsPerCorrect = 10;
 
   const correctLabel = useMemo(() => {
@@ -70,14 +71,14 @@ export default function GameClient() {
     stateRef.current = state;
   }, [state]);
 
-  const fetchNext = async () => {
+  const fetchNext = async (sArg?: GameState) => {
     setErr(null);
     setLoading(true);
     setSelected(null);
     setShowExplain(false);
     answeredRef.current = false;
 
-    const s = stateRef.current;
+    const s = sArg ?? stateRef.current;
 
     try {
       const r = await fetch("/api/quiz/next", {
@@ -100,26 +101,29 @@ export default function GameClient() {
     }
   };
 
-  const resetLocal = () => {
+  const resetLocal = async () => {
     if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+
     const fresh = safeState(null);
     setState(fresh);
     stateRef.current = fresh;
+
     setSelected(null);
     setShowExplain(false);
     setQuiz(null);
+
     answeredRef.current = false;
     submittingRef.current = false;
-    setTimeout(() => fetchNext(), 0);
+
+    await fetchNext(fresh);
   };
 
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
 
-    // ✅ เข้า /game?new=1 -> รีเซ็ตก่อนเริ่ม
     if (params.get("new") === "1") {
-      resetLocal();
+      resetLocal(); // reset แล้ว fetchNext(fresh) ในตัว
       return;
     }
 
@@ -130,7 +134,6 @@ export default function GameClient() {
   const confirmAnswer = () => {
     if (!quiz || !selected || showExplain) return;
 
-    // ✅ กันกดซ้ำเร็ว ๆ
     if (answeredRef.current) return;
     answeredRef.current = true;
 
@@ -172,8 +175,7 @@ export default function GameClient() {
 
     if (typeof window !== "undefined") {
       localStorage.setItem("pq_last_summary_v1", JSON.stringify(s));
-      // ✅ จบเกมแล้วล้างคะแนนในเครื่องทันที (กันพุ่ง)
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_KEY); // ✅ จบเกมล้าง local score
       window.location.href = "/summary";
     }
   };
@@ -192,16 +194,10 @@ export default function GameClient() {
           </div>
 
           <div className="flex gap-2">
-            <button
-              onClick={endGame}
-              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
-            >
+            <button onClick={endGame} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
               จบเกม
             </button>
-            <button
-              onClick={resetLocal}
-              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
-            >
+            <button onClick={resetLocal} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
               เริ่มเกมใหม่
             </button>
           </div>
@@ -214,10 +210,7 @@ export default function GameClient() {
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
           {err}
           <div className="mt-2">
-            <button
-              className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10"
-              onClick={fetchNext}
-            >
+            <button className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10" onClick={() => fetchNext()}>
               ลองใหม่
             </button>
           </div>
@@ -246,17 +239,14 @@ export default function GameClient() {
             </button>
 
             <button
-              onClick={fetchNext}
+              onClick={() => fetchNext()}
               disabled={!showExplain}
               className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-40"
             >
               ข้อต่อไป
             </button>
 
-            <button
-              onClick={endGame}
-              className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10"
-            >
+            <button onClick={endGame} className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10">
               ไปหน้าสรุป
             </button>
           </div>
