@@ -47,10 +47,7 @@ export default function HomePage() {
 
       {/* Mission Select */}
       <div className="grid gap-4 md:grid-cols-2">
-        <motion.div
-          whileHover={{ y: -2 }}
-          className="pq-card pq-glow p-6"
-        >
+        <motion.div whileHover={{ y: -2 }} className="pq-card pq-glow p-6">
           <div className="pq-title">MISSION 01</div>
           <div className="mt-2 text-xl font-semibold">โหมดปกติ (Quiz)</div>
           <p className="mt-2 text-sm pq-text-muted">
@@ -65,10 +62,7 @@ export default function HomePage() {
           </div>
         </motion.div>
 
-        <motion.div
-          whileHover={{ y: -2 }}
-          className="pq-card pq-glow p-6"
-        >
+        <motion.div whileHover={{ y: -2 }} className="pq-card pq-glow p-6">
           <div className="pq-title">MISSION 02</div>
           <div className="mt-2 text-xl font-semibold">Inbox Mode</div>
           <p className="mt-2 text-sm pq-text-muted">
@@ -77,7 +71,8 @@ export default function HomePage() {
 
           <div className="mt-4 flex items-center justify-between">
             <div className="pq-badge">15 pts / ข้อ</div>
-            <Link href="/inbox" className="pq-btn pq-btn-primary">
+            {/* ✅ ใส่ ?new=1 */}
+            <Link href="/inbox?new=1" className="pq-btn pq-btn-primary">
               เริ่มโหมดนี้
             </Link>
           </div>

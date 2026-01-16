@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { MessageCard, type InboxItem } from "@/components/MessageCard";
 
@@ -16,7 +17,6 @@ type InboxState = {
   redFlagsSeen: string[];
 };
 
-// ✅ เปลี่ยนเป็น v2 กันชนกับข้อมูลเก่า
 const STORAGE_KEY = "pq_inbox_v2";
 
 const DEFAULT_STATE: InboxState = {
@@ -47,44 +47,55 @@ function coerceState(input: any): InboxState {
 
 function loadState(): InboxState {
   if (typeof window === "undefined") return DEFAULT_STATE;
-
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return DEFAULT_STATE;
-
   try {
-    const parsed = JSON.parse(raw);
-    return coerceState(parsed);
+    return coerceState(JSON.parse(raw));
   } catch {
     return DEFAULT_STATE;
   }
 }
 
 function saveState(s: InboxState) {
+  if (typeof window === "undefined") return;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
 }
 
 export default function InboxModePage() {
+  const params = useSearchParams();
+
   const [item, setItem] = useState<InboxItem | null>(null);
   const [picked, setPicked] = useState<Verdict | null>(null);
   const [showExplain, setShowExplain] = useState(false);
 
   const [state, setState] = useState<InboxState>(() => loadState());
+  const stateRef = useRef<InboxState>(state);
+
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const pointsPerCorrect = 15;
 
   const didInit = useRef(false);
+  const answeredRef = useRef(false);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const fetchNext = async () => {
     setErr(null);
     setLoading(true);
     setPicked(null);
     setShowExplain(false);
+    answeredRef.current = false;
+
+    const s = stateRef.current;
 
     try {
-      const recentHashes = (state.recentHashes ?? []).slice(-12);
-      const recentVerdicts = (state.recentVerdicts ?? []).slice(-8);
+      const recentHashes = (s.recentHashes ?? []).slice(-20);
+      const recentVerdicts = (s.recentVerdicts ?? []).slice(-12);
 
       const r = await fetch("/api/inbox/next", {
         method: "POST",
@@ -103,66 +114,91 @@ export default function InboxModePage() {
     }
   };
 
+  const resetLocal = () => {
+    if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+    setState(DEFAULT_STATE);
+    stateRef.current = DEFAULT_STATE;
+    setPicked(null);
+    setShowExplain(false);
+    setItem(null);
+    answeredRef.current = false;
+    submittingRef.current = false;
+    setTimeout(() => fetchNext(), 0);
+  };
+
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    setTimeout(() => fetchNext(), 0);
+
+    // ✅ เข้า /inbox?new=1 -> รีเซ็ตก่อน
+    if (params.get("new") === "1") {
+      resetLocal();
+      return;
+    }
+
+    fetchNext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const confirm = () => {
     if (!item || !picked || showExplain) return;
 
+    // ✅ กันกดซ้ำเร็ว ๆ
+    if (answeredRef.current) return;
+    answeredRef.current = true;
+
     setShowExplain(true);
     const isCorrect = picked === item.verdict;
 
-    const next: InboxState = {
-      score: state.score + (isCorrect ? pointsPerCorrect : 0),
-      answered: state.answered + 1,
-      correct: state.correct + (isCorrect ? 1 : 0),
-      wrong: state.wrong + (isCorrect ? 0 : 1),
-      recentHashes: [...(state.recentHashes ?? []), item.hash].slice(-30),
-      recentVerdicts: [...(state.recentVerdicts ?? []), item.verdict].slice(-30),
-      redFlagsSeen: [...(state.redFlagsSeen ?? []), ...(item.redFlags ?? [])].slice(-80),
-    };
-
-    setState(next);
-    saveState(next);
+    setState((prev) => {
+      const next: InboxState = {
+        score: prev.score + (isCorrect ? pointsPerCorrect : 0),
+        answered: prev.answered + 1,
+        correct: prev.correct + (isCorrect ? 1 : 0),
+        wrong: prev.wrong + (isCorrect ? 0 : 1),
+        recentHashes: [...(prev.recentHashes ?? []), item.hash].slice(-40),
+        recentVerdicts: [...(prev.recentVerdicts ?? []), item.verdict].slice(-40),
+        redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(item.redFlags ?? [])].slice(-120),
+      };
+      stateRef.current = next;
+      saveState(next);
+      return next;
+    });
   };
 
   const endGame = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
+    const s = stateRef.current;
+
     await fetch("/api/score/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ score: state.score, questionsCount: state.answered }),
+      body: JSON.stringify({ score: s.score, questionsCount: s.answered, mode: "inbox" }),
     }).catch(() => {});
 
-    localStorage.setItem(
-      "pq_last_summary_v1",
-      JSON.stringify({
-        score: state.score,
-        answered: state.answered,
-        correct: state.correct,
-        wrong: state.wrong,
-        historySignals: Array.from(new Set(state.redFlagsSeen ?? [])).slice(0, 30),
-        historyStems: [],
-      })
-    );
+    if (typeof window !== "undefined") {
+      localStorage.setItem(
+        "pq_last_summary_v1",
+        JSON.stringify({
+          score: s.score,
+          answered: s.answered,
+          correct: s.correct,
+          wrong: s.wrong,
+          historySignals: Array.from(new Set(s.redFlagsSeen ?? [])).slice(0, 30),
+          historyStems: [],
+        })
+      );
 
-    window.location.href = "/summary";
-  };
-
-  const resetLocal = () => {
-    setState(DEFAULT_STATE);
-    saveState(DEFAULT_STATE);
-    setPicked(null);
-    setShowExplain(false);
-    fetchNext();
+      // ✅ จบเกมแล้วล้างคะแนนในเครื่องทันที
+      localStorage.removeItem(STORAGE_KEY);
+      window.location.href = "/summary";
+    }
   };
 
   return (
     <div className="space-y-4">
-
       <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -180,11 +216,13 @@ export default function InboxModePage() {
               จบเกม
             </button>
             <button onClick={resetLocal} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
-              รีเซ็ต (ในเครื่อง)
+              เริ่มเกมใหม่
             </button>
           </div>
         </div>
       </div>
+
+      <LoadingOverlay show={loading} mode="screen" text="กำลังสุ่มอีเมล/ข้อความ…" />
 
       {err && (
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
@@ -197,9 +235,6 @@ export default function InboxModePage() {
         </div>
       )}
 
-<div className="relative"></div>
-      <LoadingOverlay show={loading} mode="local" text="กำลังสุ่มอีเมล/ข้อความ…" />
-      
       {item && (
         <>
           <MessageCard

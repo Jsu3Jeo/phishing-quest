@@ -138,20 +138,20 @@ async function getCachedQuiz(recentStems: string[]) {
 async function generateQuiz(avoidSignals: string[], avoidStems: string[]) {
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-  const prompt = `
-คุณคือครูสอน cybersecurity ทำโจทย์ฝึกจับ phishing แบบ "คำถามสถานการณ์" 1 ข้อ (ภาษาไทยเป็นหลัก แทรกอังกฤษได้เล็กน้อย)
-ผู้เล่นต้องเลือก "คำตอบที่ถูกต้องที่สุด" จาก 4 ตัวเลือก
+const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-เงื่อนไขสำคัญ:
-- ตัวเลือกทั้ง 4 ต้องต่างกันชัดเจน (ห้ามซ้ำ/คล้ายมาก)
-- ต้องมี explanation รายข้อ
-- ต้องมี correctId ที่อ้างถึง option.id (ไม่ใช่ A/B/C/D)
-- หลีกเลี่ยง stem ซ้ำหรือใกล้เคียงกับที่ผ่านมา:
+const prompt = `
+NONCE=${nonce}
+คุณคือครูสอน cybersecurity ออกโจทย์ฝึกจับ phishing แบบ "สถานการณ์" 1 ข้อ
+
+เงื่อนไขกันซ้ำ (สำคัญมาก):
+- ห้ามใช้ประโยค/รูปแบบ/เทมเพลตเดิมซ้ำ
+- หัวข้อให้สุ่มจากหลายธีม: ธนาคาร, ขนส่งพัสดุ, social, work email, OTP, marketplace, streaming, travel, gov, telecom
+- หลีกเลี่ยง stem ที่คล้ายของเดิม: 
 ${avoidStems.map((s) => `- ${s}`).join("\n")}
-- หลีกเลี่ยง signals ซ้ำเยอะ:
-${avoidSignals.map((s) => `- ${s}`).join("\n")}
 
-ตอบกลับเป็น JSON อย่างเดียว ห้ามมี markdown
+ต้องได้ 4 ตัวเลือกที่ต่างกันมาก (ห้ามคำตอบคล้ายกัน)
+ตอบเป็น JSON เท่านั้น ห้าม markdown
 
 รูปแบบ JSON:
 {

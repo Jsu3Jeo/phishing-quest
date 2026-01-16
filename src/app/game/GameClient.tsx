@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { QuizCard, type Quiz } from "@/components/QuizCard";
 
@@ -43,6 +44,8 @@ function saveState(s: GameState) {
 }
 
 export default function GameClient() {
+  const params = useSearchParams();
+
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [selected, setSelected] = useState<"A" | "B" | "C" | "D" | null>(null);
   const [showExplain, setShowExplain] = useState(false);
@@ -51,6 +54,7 @@ export default function GameClient() {
   const [err, setErr] = useState<string | null>(null);
 
   const [state, setState] = useState<GameState>(() => loadState());
+  const stateRef = useRef<GameState>(state);
   const pointsPerCorrect = 10;
 
   const correctLabel = useMemo(() => {
@@ -58,22 +62,30 @@ export default function GameClient() {
     return quiz.options.find((o) => o.isCorrect)?.label ?? null;
   }, [quiz]);
 
-  // กัน StrictMode ยิงซ้ำใน dev
   const didInit = useRef(false);
+  const answeredRef = useRef(false);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const fetchNext = async () => {
     setErr(null);
     setLoading(true);
     setSelected(null);
     setShowExplain(false);
+    answeredRef.current = false;
+
+    const s = stateRef.current;
 
     try {
       const r = await fetch("/api/quiz/next", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          recentSignals: (state.historySignals ?? []).slice(-10),
-          recentStems: (state.historyStems ?? []).slice(-5),
+          recentSignals: (s.historySignals ?? []).slice(-12),
+          recentStems: (s.historyStems ?? []).slice(-10),
         }),
       });
 
@@ -88,15 +100,39 @@ export default function GameClient() {
     }
   };
 
+  const resetLocal = () => {
+    if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+    const fresh = safeState(null);
+    setState(fresh);
+    stateRef.current = fresh;
+    setSelected(null);
+    setShowExplain(false);
+    setQuiz(null);
+    answeredRef.current = false;
+    submittingRef.current = false;
+    setTimeout(() => fetchNext(), 0);
+  };
+
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
+
+    // ✅ เข้า /game?new=1 -> รีเซ็ตก่อนเริ่ม
+    if (params.get("new") === "1") {
+      resetLocal();
+      return;
+    }
+
     fetchNext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const confirmAnswer = () => {
     if (!quiz || !selected || showExplain) return;
+
+    // ✅ กันกดซ้ำเร็ว ๆ
+    if (answeredRef.current) return;
+    answeredRef.current = true;
 
     if (!correctLabel) {
       setErr("โจทย์มีรูปแบบผิดพลาด (ไม่มีคำตอบที่ถูก) กดข้อต่อไป");
@@ -107,37 +143,39 @@ export default function GameClient() {
     setShowExplain(true);
     const isCorrect = selected === correctLabel;
 
-    const next: GameState = {
-      score: state.score + (isCorrect ? pointsPerCorrect : 0),
-      answered: state.answered + 1,
-      correct: state.correct + (isCorrect ? 1 : 0),
-      wrong: state.wrong + (isCorrect ? 0 : 1),
-      historySignals: [...(state.historySignals ?? []), ...(quiz.signals ?? [])].slice(-30),
-      historyStems: [...(state.historyStems ?? []), quiz.stem].slice(-10),
-    };
-
-    setState(next);
-    saveState(next);
+    setState((prev) => {
+      const next: GameState = {
+        score: prev.score + (isCorrect ? pointsPerCorrect : 0),
+        answered: prev.answered + 1,
+        correct: prev.correct + (isCorrect ? 1 : 0),
+        wrong: prev.wrong + (isCorrect ? 0 : 1),
+        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-40),
+        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-20),
+      };
+      stateRef.current = next;
+      saveState(next);
+      return next;
+    });
   };
 
   const endGame = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+
+    const s = stateRef.current;
+
     await fetch("/api/score/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ score: state.score, questionsCount: state.answered }),
+      body: JSON.stringify({ score: s.score, questionsCount: s.answered, mode: "quiz" }),
     }).catch(() => {});
 
-    localStorage.setItem("pq_last_summary_v1", JSON.stringify(state));
-    window.location.href = "/summary";
-  };
-
-  const resetLocal = () => {
-    const fresh: GameState = safeState(null);
-    setState(fresh);
-    saveState(fresh);
-    setSelected(null);
-    setShowExplain(false);
-    setTimeout(() => fetchNext(), 0);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("pq_last_summary_v1", JSON.stringify(s));
+      // ✅ จบเกมแล้วล้างคะแนนในเครื่องทันที (กันพุ่ง)
+      localStorage.removeItem(STORAGE_KEY);
+      window.location.href = "/summary";
+    }
   };
 
   return (
@@ -164,13 +202,12 @@ export default function GameClient() {
               onClick={resetLocal}
               className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
             >
-              รีเซ็ต (คะแนนของคุณ)
+              เริ่มเกมใหม่
             </button>
           </div>
         </div>
       </div>
 
-      {/* ✅ Overlay ไม่ทับ header/score: ให้มันเป็น "screen" ครอบเต็มจอ */}
       <LoadingOverlay show={loading} mode="screen" text="กำลังสร้างโจทย์…" />
 
       {err && (
