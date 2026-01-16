@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+/* ---------- Theme tokens ---------- */
+:root{
+  --bg0: #05060a;
+  --bg1: #070a12;
+
+  --fg: 255 255 255;
+  --muted: 255 255 255;
+  --muted-a: 0.72;
+
+  --card: 255 255 255;
+  --card-a: 0.06;
+
+  --line: 255 255 255;
+  --line-a: 0.12;
+
+  --glow: 90 255 240;   /* cyan */
+  --glow2: 120 130 255; /* indigo */
+  --danger: 255 90 90;
+  --ok: 64 255 170;
+}
+
+html, body { height: 100%; }
+body{
+  background:
+    radial-gradient(1200px 700px at 50% 0%, rgba(120,130,255,0.18), transparent 60%),
+    radial-gradient(900px 600px at 15% 20%, rgba(90,255,240,0.12), transparent 55%),
+    radial-gradient(900px 600px at 85% 30%, rgba(90,255,240,0.10), transparent 55%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+  color: rgb(var(--fg));
+}
+
+::selection{ background: rgba(90,255,240,0.25); }
+
+/* ---------- Animations ---------- */
+@keyframes pq-noise {
+  0% { transform: translate3d(0,0,0); opacity: .10; }
+  20% { transform: translate3d(-2%, 1%,0); opacity: .07; }
+  40% { transform: translate3d(1%, -2%,0); opacity: .09; }
+  60% { transform: translate3d(2%, 2%,0); opacity: .06; }
+  80% { transform: translate3d(-1%, -1%,0); opacity: .08; }
+  100% { transform: translate3d(0,0,0); opacity: .10; }
+}
+
+@keyframes pq-float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes pq-scan {
+  0% { transform: translateY(-140%); opacity: 0; }
+  20% { opacity: .25; }
+  100% { transform: translateY(140%); opacity: 0; }
+}
+
+@keyframes pq-shimmer {
+  0% { transform: translateX(-120%); opacity: 0; }
+  20% { opacity: .45; }
+  100% { transform: translateX(120%); opacity: 0; }
+}
+
+/* ---------- “Game UI” utility classes (ใช้ได้ทุกหน้า) ---------- */
+.pq-card{
+  background: rgba(var(--card), var(--card-a));
+  border: 1px solid rgba(var(--line), var(--line-a));
+  border-radius: 18px;
+  backdrop-filter: blur(12px);
+}
+
+.pq-glow{
+  box-shadow:
+    0 0 0 1px rgba(var(--line), .12),
+    0 20px 80px rgba(0,0,0,.35),
+    0 0 44px rgba(var(--glow), .14);
+}
+
+.pq-text-muted{ color: rgba(var(--muted), var(--muted-a)); }
+
+.pq-scanline{
+  position: relative;
+  overflow: hidden;
+}
+.pq-scanline::after{
+  content:"";
+  position:absolute;
+  inset:-40%;
+  background: linear-gradient(180deg, transparent, rgba(90,255,240,.18), transparent);
+  animation: pq-scan 3.6s linear infinite;
+  pointer-events:none;
+  mix-blend-mode: screen;
+}
+
+.pq-title{
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(var(--muted), .70);
+  font-size: 12px;
+}
+
+.pq-btn{
+  border-radius: 14px;
+  border: 1px solid rgba(var(--line), .18);
+  padding: 10px 14px;
+  transition: transform .12s ease, background .12s ease, border-color .12s ease, opacity .12s ease;
+  user-select: none;
+}
+.pq-btn:hover{ transform: translateY(-1px); background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.26); }
+.pq-btn:active{ transform: translateY(0px) scale(.99); }
+.pq-btn:disabled{ opacity: .45; cursor: not-allowed; }
+
+.pq-btn-primary{
+  background: white;
+  color: black;
+  border-color: rgba(255,255,255,.35);
+}
+.pq-btn-primary:hover{ opacity: .92; background: white; }
+
+.pq-btn-danger{
+  border-color: rgba(var(--danger), .45);
+}
+.pq-btn-danger:hover{
+  background: rgba(var(--danger), .10);
+  border-color: rgba(var(--danger), .70);
+}
+
+.pq-input{
+  width: 100%;
+  border-radius: 14px;
+  border: 1px solid rgba(var(--line), .14);
+  background: rgba(0,0,0,.28);
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color .12s ease, background .12s ease;
+}
+.pq-input:focus{
+  border-color: rgba(255,255,255,.30);
+  background: rgba(0,0,0,.34);
+}
+
+.pq-badge{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--line), .14);
+  background: rgba(255,255,255,.05);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: rgba(var(--muted), .78);
+}
+
+.pq-shimmer{
+  position: relative;
+  overflow: hidden;
+}
+.pq-shimmer::before{
+  content:"";
+  position:absolute;
+  top:0; bottom:0;
+  width: 42%;
+  left: -50%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent);
+  animation: pq-shimmer 2.2s ease-in-out infinite;
+  pointer-events:none;
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce){
+  .pq-scanline::after{ animation:none; }
+  .pq-shimmer::before{ animation:none; }
+}

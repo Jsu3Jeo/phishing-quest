@@ -1,0 +1,41 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma v7: ห้ามมี url ใน schema แล้ว (ย้ายไป prisma.config.ts)
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  displayName  String?  @unique
+  totalScore   Int      @default(0)
+  gamesPlayed  Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  gameLogs GameLog[]
+}
+
+model Question {
+  id          String   @id @default(cuid())
+  hash        String   @unique
+  contentJson String
+  createdAt   DateTime @default(now())
+}
+
+model GameLog {
+  id             String   @id @default(cuid())
+  userId         String
+  score          Int
+  questionsCount Int
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
