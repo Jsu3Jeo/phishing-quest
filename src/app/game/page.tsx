@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { QuizCard, type Quiz } from "@/components/QuizCard";
 
@@ -21,8 +22,8 @@ function safeState(v: any): GameState {
     answered: typeof v?.answered === "number" ? v.answered : 0,
     correct: typeof v?.correct === "number" ? v.correct : 0,
     wrong: typeof v?.wrong === "number" ? v.wrong : 0,
-    historySignals: Array.isArray(v?.historySignals) ? v.historySignals.map(String) : [],
-    historyStems: Array.isArray(v?.historyStems) ? v.historyStems.map(String) : [],
+    historySignals: Array.isArray(v?.historySignals) ? v.historySignals.map(String).filter(Boolean) : [],
+    historyStems: Array.isArray(v?.historyStems) ? v.historyStems.map(String).filter(Boolean) : [],
   };
 }
 
@@ -42,6 +43,8 @@ function saveState(s: GameState) {
 }
 
 export default function GamePage() {
+  const sp = useSearchParams();
+
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [selected, setSelected] = useState<"A" | "B" | "C" | "D" | null>(null);
   const [showExplain, setShowExplain] = useState(false);
@@ -50,6 +53,7 @@ export default function GamePage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [state, setState] = useState<GameState>(() => loadState());
+
   const pointsPerCorrect = 10;
 
   const correctLabel = useMemo(() => {
@@ -57,9 +61,17 @@ export default function GamePage() {
     return quiz.options.find((o) => o.isCorrect)?.label ?? null;
   }, [quiz]);
 
+  // ✅ กัน StrictMode ยิง useEffect ซ้ำ
   const didInit = useRef(false);
 
+  // ✅ กันคลิกยืนยัน/จบเกมซ้ำ ๆ (สาเหตุคะแนนกระโดด)
+  const confirmLocked = useRef(false);
+  const endLocked = useRef(false);
+
   const fetchNext = async () => {
+    // ปลดล็อคทุกครั้งที่เริ่มข้อใหม่
+    confirmLocked.current = false;
+
     setErr(null);
     setLoading(true);
     setSelected(null);
@@ -90,12 +102,25 @@ export default function GamePage() {
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
+
+    // ✅ ถ้าเข้ามาด้วย /game?new=1 ให้เริ่มเกมใหม่ (คะแนนเริ่ม 0)
+    if (sp.get("new") === "1") {
+      const fresh = safeState(null);
+      setState(fresh);
+      saveState(fresh);
+    }
+
     fetchNext();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const confirmAnswer = () => {
+    if (confirmLocked.current) return; // ✅ กันกดซ้ำ
     if (!quiz || !selected || showExplain) return;
+
+    confirmLocked.current = true; // ✅ ล็อคทันที
+    setErr(null);
+
     if (!correctLabel) {
       setErr("โจทย์มีรูปแบบผิดพลาด (ไม่มีคำตอบที่ถูก) กดข้อต่อไป");
       setShowExplain(true);
@@ -119,29 +144,42 @@ export default function GamePage() {
   };
 
   const endGame = async () => {
-    await fetch("/api/score/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ score: state.score, questionsCount: state.answered }),
-    }).catch(() => {});
+    if (endLocked.current) return; // ✅ กันกดซ้ำ (กันคะแนนใน DB พุ่ง)
+    endLocked.current = true;
 
-    localStorage.setItem("pq_last_summary_v1", JSON.stringify(state));
-    window.location.href = "/summary";
+    try {
+      await fetch("/api/score/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ score: state.score, questionsCount: state.answered }),
+      }).catch(() => {});
+    } finally {
+      localStorage.setItem("pq_last_summary_v1", JSON.stringify(state));
+      window.location.href = "/summary";
+    }
   };
 
   const resetLocal = () => {
     const fresh: GameState = safeState(null);
     setState(fresh);
     saveState(fresh);
+
     setSelected(null);
     setShowExplain(false);
+    setErr(null);
+
+    // ปลดล็อค
+    confirmLocked.current = false;
+    endLocked.current = false;
+
     // fetch ใหม่แบบไม่พึ่ง state เก่า
     setTimeout(() => fetchNext(), 0);
   };
 
   return (
     <div className="space-y-4">
-
+      {/* ✅ Overlay แบบไม่ทับ score: ให้เป็น global */}
+      <LoadingOverlay show={loading} mode="screen" text="กำลังสร้างโจทย์…" />
 
       <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -155,10 +193,18 @@ export default function GamePage() {
           </div>
 
           <div className="flex gap-2">
-            <button onClick={endGame} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
+            <button
+              onClick={endGame}
+              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+              disabled={loading}
+            >
               จบเกม
             </button>
-            <button onClick={resetLocal} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
+            <button
+              onClick={resetLocal}
+              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+              disabled={loading}
+            >
               รีเซ็ต (คะแนนของคุณ)
             </button>
           </div>
@@ -169,14 +215,16 @@ export default function GamePage() {
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
           {err}
           <div className="mt-2">
-            <button className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10" onClick={fetchNext}>
+            <button
+              className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10 disabled:opacity-40"
+              onClick={fetchNext}
+              disabled={loading}
+            >
               ลองใหม่
             </button>
           </div>
         </div>
       )}
-<div className="relative"></div>
-      <LoadingOverlay show={loading} mode="local" text="กำลังสร้างโจทย์…" />
 
       {quiz && (
         <>
@@ -193,7 +241,7 @@ export default function GamePage() {
           <div className="flex flex-wrap gap-3">
             <button
               onClick={confirmAnswer}
-              disabled={!selected || showExplain}
+              disabled={!selected || showExplain || loading}
               className="rounded-xl bg-white px-4 py-2 font-medium text-black hover:opacity-90 disabled:opacity-40"
             >
               ยืนยันคำตอบ
@@ -201,13 +249,17 @@ export default function GamePage() {
 
             <button
               onClick={fetchNext}
-              disabled={!showExplain}
+              disabled={!showExplain || loading}
               className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-40"
             >
               ข้อต่อไป
             </button>
 
-            <button onClick={endGame} className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10">
+            <button
+              onClick={endGame}
+              disabled={loading}
+              className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-40"
+            >
               ไปหน้าสรุป
             </button>
           </div>

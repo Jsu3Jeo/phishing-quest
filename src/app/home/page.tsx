@@ -59,7 +59,7 @@ export default function HomePage() {
 
           <div className="mt-4 flex items-center justify-between">
             <div className="pq-badge">10 pts / ข้อ</div>
-            <Link href="/game" className="pq-btn pq-btn-primary">
+            <Link href="/game?new=1" className="pq-btn pq-btn-primary">
               เริ่มโหมดนี้
             </Link>
           </div>
