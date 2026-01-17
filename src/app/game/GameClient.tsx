@@ -114,6 +114,7 @@ export default function GameClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        answered: s.answered,
         freshOnly: true,
         recentHashes: (s.recentHashes ?? []).slice(-300),
         recentSignals: (s.historySignals ?? []).slice(-60),

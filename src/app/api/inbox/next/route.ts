@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { getSessionFromRequest } from "@/lib/auth";
-import { openai } from "@/lib/openai";
-import { sha256, safeJsonParse } from "@/lib/utils";
+import { sha256 } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +24,7 @@ const ItemSchema = z.object({
 export type ItemOut = z.infer<typeof ItemSchema> & {
   kind: "inbox";
   hash: string;
-  source?: "ai";
+  source?: "bank";
 };
 
 function normalizeText(s: string) {
@@ -52,175 +51,248 @@ function hashItem(i: Omit<ItemOut, "hash" | "kind" | "source">) {
   return sha256(base.toLowerCase());
 }
 
-function grams3(s: string) {
-  const x = normalizeText(s)
-    .toLowerCase()
-    .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const set = new Set<string>();
-  if (x.length < 3) {
-    if (x) set.add(x);
-    return set;
-  }
-  for (let i = 0; i <= x.length - 3; i++) set.add(x.slice(i, i + 3));
-  return set;
+function buildOut(x: z.infer<typeof ItemSchema>): ItemOut {
+  const hash = hashItem(x as any);
+  return { kind: "inbox", ...(x as any), hash, source: "bank" };
 }
 
-function jaccard(a: Set<string>, b: Set<string>) {
-  if (!a.size && !b.size) return 1;
-  let inter = 0;
-  for (const v of a) if (b.has(v)) inter++;
-  const uni = a.size + b.size - inter;
-  return uni === 0 ? 0 : inter / uni;
-}
-
-function extractLikelyJson(text: string) {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) return text.slice(start, end + 1);
-  return null;
-}
-
-function parseItem(text: string) {
-  const p1 = safeJsonParse<unknown>(text);
-  if (p1.ok) {
-    const z1 = ItemSchema.safeParse(p1.data);
-    if (z1.success) return z1.data;
-  }
-  const cut = extractLikelyJson(text);
-  if (cut) {
-    const p2 = safeJsonParse<unknown>(cut);
-    if (p2.ok) {
-      const z2 = ItemSchema.safeParse(p2.data);
-      if (z2.success) return z2.data;
-    }
-  }
-  return null;
-}
-
-async function generateInboxAI(avoidHints: string[]) {
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-  const prompt = `
-NONCE=${nonce}
-สร้าง "อีเมลหรือ SMS" 1 ชิ้น สำหรับฝึกจับ phishing (ไทยเป็นหลัก) ให้สมจริง
-
-สำคัญมาก:
-- ต้อง "ใหม่" และ "ไม่คล้าย" สิ่งที่เคยมีด้านล่าง (ห้ามใช้โครงเรื่อง/วลี/ธีมใกล้เคียง)
-- ใส่รายละเอียดเฉพาะเจาะจง (บริบท/เวลา/ชื่อบริการ/คำขู่/ข้อเสนอ) ที่ต่างจากเดิม
-- ตอบเป็น JSON อย่างเดียว
-- verdict สุ่มได้ทั้ง "legit" หรือ "phishing"
-- ต้องมี explanation, redFlags>=2, safeActions>=2
-
-หลีกเลี่ยงซ้ำ/คล้ายกับ:
-${avoidHints.slice(-40).map((x) => `- ${x}`).join("\n")}
-
-JSON:
-{
-  "channel": "email|sms",
-  "from": "...",
-  "to": "... (optional)",
-  "subject": "... (optional)",
-  "body": "....",
-  "links": [{"text":"...","url":"..."}],
-  "attachments": ["..."] (optional),
-  "verdict": "legit|phishing",
-  "explanation": "...",
-  "redFlags": ["...", "..."],
-  "safeActions": ["...", "..."]
-}
-`.trim();
-
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 5200);
-
-  try {
-    const resp = await openai.chat.completions.create(
-      {
-        model,
-        messages: [
-          { role: "system", content: "Return ONLY valid JSON. No markdown. No extra text." },
-          { role: "user", content: prompt },
-        ],
-        response_format: { type: "json_object" } as any,
-        temperature: 0.85,
-        max_tokens: 650,
-      } as any,
-      { signal: controller.signal } as any
-    );
-
-    const text = resp.choices[0]?.message?.content?.trim() || "";
-    const parsed = parseItem(text);
-    if (!parsed) return null;
-
-    const hash = hashItem(parsed as any);
-    const out: ItemOut = { kind: "inbox", ...(parsed as any), hash, source: "ai" };
-    return out;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(t);
-  }
-}
+/** ✅ 20 ชิ้น: Inbox Mode (ใช้โดเมนตัวอย่างเพื่อความปลอดภัย) */
+const INBOX_BANK: z.infer<typeof ItemSchema>[] = [
+  {
+    channel: "sms",
+    from: "Delivery-Notice",
+    body: "พัสดุของคุณถูกตีกลับ กรุณายืนยันที่อยู่ภายใน 60 นาที: https://parcel-fix.example.com/addr",
+    links: [{ text: "ยืนยันที่อยู่", url: "https://parcel-fix.example.com/addr" }],
+    verdict: "phishing",
+    explanation: "เร่งด่วน + ลิงก์แปลก ไม่ใช่ช่องทางขนส่งทางการ",
+    redFlags: ["เร่งให้ทำภายในเวลา", "โดเมนไม่ทางการ", "ชวนกรอกข้อมูลส่วนตัว"],
+    safeActions: ["เช็คสถานะจากแอป/เว็บขนส่งจริง", "อย่ากดลิงก์", "รายงาน/บล็อก"],
+  },
+  {
+    channel: "email",
+    from: "security@sample-mail.com",
+    subject: "Unusual sign-in attempt",
+    body: "We detected a login attempt. If this wasn’t you, secure your account immediately.",
+    links: [{ text: "Secure account", url: "https://secure-login.sample-mail.com" }],
+    verdict: "phishing",
+    explanation: "โดเมนไม่ใช่ของผู้ให้บริการจริง + ลิงก์ให้ล็อกอินด่วน",
+    redFlags: ["โดเมนผู้ส่งไม่ทางการ", "มีปุ่มให้ล็อกอินผ่านลิงก์", "ใช้ความกลัวเร่งให้ทำ"],
+    safeActions: ["เข้าเว็บ/แอปจริงด้วยตัวเอง", "เปลี่ยนรหัสผ่านในระบบจริง", "เปิด 2FA"],
+  },
+  {
+    channel: "email",
+    from: "no-reply@service.example.com",
+    subject: "ใบเสร็จรับเงิน (Receipt) สำหรับคำสั่งซื้อของคุณ",
+    body: "ขอบคุณสำหรับการสั่งซื้อ หากคุณไม่ได้ทำรายการ โปรดติดต่อศูนย์ช่วยเหลือผ่านหน้าเว็บไซต์ทางการ",
+    links: [{ text: "Help Center", url: "https://service.example.com/help" }],
+    verdict: "legit",
+    explanation: "เนื้อหาไม่เร่งรัด ไม่ขอข้อมูลสำคัญ และลิงก์ไปหน้า help ปกติ",
+    redFlags: ["อีเมลเกี่ยวกับการซื้อขายอาจทำให้ตกใจได้"],
+    safeActions: ["ตรวจรายการซื้อในบัญชีทางการ", "อย่าดาวน์โหลดไฟล์แนบแปลกๆ", "ติดต่อช่องทางทางการ"],
+  },
+  {
+    channel: "sms",
+    from: "Bank-Alert",
+    body: "ตรวจพบธุรกรรมผิดปกติ กรุณายืนยัน OTP เพื่อยกเลิก: https://bank-verify.example.net/otp",
+    links: [{ text: "ยืนยัน OTP", url: "https://bank-verify.example.net/otp" }],
+    verdict: "phishing",
+    explanation: "ธนาคารจริงไม่ขอ OTP ผ่านลิงก์ SMS แบบนี้",
+    redFlags: ["ขอ OTP", "ลิงก์ใน SMS", "อ้างธุรกรรมผิดปกติให้รีบทำ"],
+    safeActions: ["โทรกลับเบอร์ธนาคารจากหลังบัตร", "เข้าแอปธนาคารตรวจรายการเอง", "อย่าให้ OTP"],
+  },
+  {
+    channel: "email",
+    from: "it-helpdesk@company.example.com",
+    subject: "Maintenance notice",
+    body: "คืนนี้มีการปรับปรุงระบบ อาจมีช่วงเวลาที่เข้าใช้งานไม่ได้เล็กน้อย ไม่มีการขอรหัสผ่านหรือ OTP",
+    links: [{ text: "Status page", url: "https://company.example.com/status" }],
+    verdict: "legit",
+    explanation: "เป็นประกาศทั่วไป ไม่ขอข้อมูลส่วนตัว และมีลิงก์สถานะระบบ",
+    redFlags: ["อีเมล IT อาจถูกปลอมได้เสมอ"],
+    safeActions: ["ตรวจโดเมนผู้ส่ง", "เข้า URL ด้วยตัวเองถ้าสงสัย", "อย่าให้รหัสผ่าน/OTP"],
+  },
+  // ---- เติมให้ครบ 20 ----
+  {
+    channel: "sms",
+    from: "Rewards",
+    body: "คุณได้รับคูปองมูลค่า 500 บาท กดรับภายในวันนี้: https://coupon-gift.example.com",
+    links: [{ text: "รับคูปอง", url: "https://coupon-gift.example.com" }],
+    verdict: "phishing",
+    explanation: "ล่อด้วยของฟรี + เร่งเวลา เป็นสัญญาณหลอกลวง",
+    redFlags: ["ของฟรีเกินจริง", "เร่งด่วน", "ลิงก์ไม่ทางการ"],
+    safeActions: ["เช็คโปรโมชันในแอป/เว็บทางการ", "อย่ากดลิงก์", "บล็อกผู้ส่ง"],
+  },
+  {
+    channel: "email",
+    from: "billing@streaming.example.com",
+    subject: "Payment failed",
+    body: "เราเรียกเก็บเงินไม่สำเร็จ กรุณาอัปเดตวิธีชำระเงินในบัญชีของคุณ (ทำผ่านหน้า Account เท่านั้น)",
+    links: [{ text: "Account", url: "https://streaming.example.com/account" }],
+    verdict: "legit",
+    explanation: "ชี้ให้ไปที่หน้า account ปกติ ไม่เร่งให้กรอกผ่านฟอร์มแปลก",
+    redFlags: ["เรื่องการเงินทำให้รีบได้"],
+    safeActions: ["เข้าเว็บ/แอปด้วยตัวเอง", "ตรวจ URL ให้ถูก", "อย่ากรอกข้อมูลในลิงก์แปลก"],
+  },
+  {
+    channel: "email",
+    from: "hr@company.example.com",
+    subject: "เอกสารเงินเดือน",
+    body: "สลิปเงินเดือนอยู่ในพอร์ทัลพนักงาน กรุณาเข้าสู่ระบบผ่านลิงก์พอร์ทัลเท่านั้น",
+    links: [{ text: "Employee portal", url: "https://company.example.com/portal" }],
+    verdict: "legit",
+    explanation: "ไม่มีไฟล์แนบสุ่ม และชี้ไปยังพอร์ทัลขององค์กร",
+    redFlags: ["HR มักถูกปลอมได้"],
+    safeActions: ["เปิดพอร์ทัลจาก bookmark/URL ที่รู้จัก", "อย่าเปิดไฟล์แนบ .zip/.exe", "ถาม HR ผ่านช่องทางภายใน"],
+  },
+  {
+    channel: "sms",
+    from: "TH-Post",
+    body: "พัสดุถึงคลังแล้ว กรุณาชำระค่าธรรมเนียม 12 บาท: https://post-fee.example.com/pay",
+    links: [{ text: "ชำระเงิน", url: "https://post-fee.example.com/pay" }],
+    verdict: "phishing",
+    explanation: "ขอเงินเล็กน้อย + ลิงก์แปลก เป็นมุกหลอกคลาสสิก",
+    redFlags: ["เรียกเก็บเงินเล็กน้อย", "ลิงก์ไม่ทางการ", "เร่งให้จ่าย"],
+    safeActions: ["เช็คในแอป/เว็บจริง", "อย่ากดลิงก์", "รายงาน/บล็อก"],
+  },
+  {
+    channel: "email",
+    from: "support@market.example.com",
+    subject: "แจ้งเตือนการเข้าสู่ระบบใหม่",
+    body: "หากไม่ใช่คุณ กรุณาเปลี่ยนรหัสผ่านผ่านหน้า Security Settings ในบัญชี",
+    links: [{ text: "Security Settings", url: "https://market.example.com/security" }],
+    verdict: "legit",
+    explanation: "แนะนำให้ทำผ่านหน้า security settings และไม่ขอ OTP ทางอีเมล",
+    redFlags: ["แจ้งเตือนความปลอดภัยทำให้ตกใจได้"],
+    safeActions: ["เข้าเว็บด้วยตัวเอง", "เปลี่ยนรหัสผ่าน/ออกจากระบบทุกอุปกรณ์", "เปิด 2FA"],
+  },
+  {
+    channel: "email",
+    from: "it@company.example.com",
+    subject: "Please install update",
+    body: "ดาวน์โหลดไฟล์แนบ Update.exe แล้วรันเพื่ออัปเดตระบบ",
+    links: [],
+    attachments: ["Update.exe"],
+    verdict: "phishing",
+    explanation: "ไฟล์ .exe แนบอีเมลคือความเสี่ยงมัลแวร์สูงมาก",
+    redFlags: ["แนบไฟล์ .exe", "สั่งให้รันโปรแกรม", "อ้างเป็น IT"],
+    safeActions: ["อย่าเปิดไฟล์", "ติดต่อ IT ผ่านช่องทางภายใน", "สแกนเครื่องถ้าดาวน์โหลดไปแล้ว"],
+  },
+  {
+    channel: "sms",
+    from: "Job-Offer",
+    body: "รับงานกดไลก์ได้เงิน 300/วัน แอดไลน์และโอนค่ายืนยัน 99 บาท: https://work-fast.example.com",
+    links: [{ text: "สมัครงาน", url: "https://work-fast.example.com" }],
+    verdict: "phishing",
+    explanation: "งานจริงไม่เก็บค่ายืนยัน และสัญญาเงินง่ายเกินจริง",
+    redFlags: ["ขอให้โอนเงินก่อน", "สัญญาเงินง่ายๆ", "ลิงก์สุ่ม"],
+    safeActions: ["หางานผ่านแหล่งน่าเชื่อถือ", "อย่าโอนเงิน", "บล็อก/รายงาน"],
+  },
+  // เติมให้ครบ 20 แบบกระชับ
+  {
+    channel: "email",
+    from: "travel@booking.example.com",
+    subject: "Booking confirmed",
+    body: "การจองของคุณยืนยันแล้ว คุณสามารถดูรายละเอียดในบัญชีของคุณ",
+    links: [{ text: "View booking", url: "https://booking.example.com/my" }],
+    verdict: "legit",
+    explanation: "ลิงก์ไปหน้าบัญชี ไม่ขอข้อมูลสำคัญ",
+    redFlags: ["อีเมลจองมักถูกปลอมได้"],
+    safeActions: ["ตรวจในบัญชีจริง", "อย่ากดลิงก์ถ้าสงสัยโดเมน", "ติดต่อศูนย์ช่วยเหลือทางการ"],
+  },
+  {
+    channel: "email",
+    from: "alerts@booking-example.net",
+    subject: "Cancel booking now",
+    body: "หากคุณไม่ได้จอง กรุณากดยกเลิกทันที",
+    links: [{ text: "Cancel", url: "https://cancel.booking-example.net" }],
+    verdict: "phishing",
+    explanation: "โดเมนเลียนแบบ + ปุ่มยกเลิกเร่งด่วน",
+    redFlags: ["โดเมนเลียนแบบ", "เร่งให้กดปุ่ม", "คุณไม่ได้ทำรายการ"],
+    safeActions: ["เข้าเว็บจริงด้วยตัวเอง", "อย่ากดปุ่มในอีเมล", "ตรวจรายการจองในบัญชี"],
+  },
+  {
+    channel: "sms",
+    from: "Mobile-Plan",
+    body: "แพ็กเกจจะหมดอายุ กรุณายืนยันบัตรเพื่อคงสิทธิ์: https://plan-keep.example.com",
+    links: [{ text: "ยืนยัน", url: "https://plan-keep.example.com" }],
+    verdict: "phishing",
+    explanation: "ผู้ให้บริการไม่ควรให้ยืนยันบัตรผ่านลิงก์สุ่ม",
+    redFlags: ["ขอข้อมูลบัตร", "ลิงก์แปลก", "เร่งด่วน"],
+    safeActions: ["เช็คในแอปผู้ให้บริการ", "อย่ากดลิงก์", "บล็อกผู้ส่ง"],
+  },
+  {
+    channel: "email",
+    from: "no-reply@cloud.example.com",
+    subject: "Storage almost full",
+    body: "พื้นที่ใกล้เต็ม คุณสามารถจัดการ/อัปเกรดได้จากหน้า Billing ในบัญชี",
+    links: [{ text: "Billing", url: "https://cloud.example.com/billing" }],
+    verdict: "legit",
+    explanation: "เป็นข้อความทั่วไป ไม่ขอรหัสผ่าน/OTP และลิงก์เป็นหน้า billing ปกติ",
+    redFlags: ["อีเมลแจ้งพื้นที่เต็มมักถูกใช้หลอกได้"],
+    safeActions: ["เข้าเว็บด้วยตัวเอง", "ตรวจ URL", "อย่าล็อกอินผ่านลิงก์แปลก"],
+  },
+  {
+    channel: "email",
+    from: "cloud-support@cloud-secure.example.net",
+    subject: "Storage full — login now",
+    body: "พื้นที่เต็มแล้ว กรุณาล็อกอินเพื่อเพิ่มพื้นที่ทันที",
+    links: [{ text: "Login", url: "https://cloud-secure.example.net/login" }],
+    verdict: "phishing",
+    explanation: "โดเมนไม่ตรงของจริง + เร่งให้ล็อกอินผ่านลิงก์",
+    redFlags: ["โดเมนไม่ทางการ", "เร่งให้ล็อกอิน", "ใช้ปัญหาเร่งด่วนหลอกคลิก"],
+    safeActions: ["เข้า cloud ผ่าน URL ที่รู้จัก", "อย่ากดลิงก์", "รายงานอีเมล"],
+  },
+  {
+    channel: "sms",
+    from: "Friend",
+    body: "ช่วยโหวตให้หน่อยได้ไหม https://vote-now.example.com",
+    links: [{ text: "โหวต", url: "https://vote-now.example.com" }],
+    verdict: "phishing",
+    explanation: "มุกปลอมเป็นคนรู้จัก ส่งลิงก์ให้กด",
+    redFlags: ["ลิงก์สั้น/แปลก", "อ้างว่าเป็นเพื่อน", "ชวนกดทันที"],
+    safeActions: ["ถามเพื่อนทางช่องทางอื่น", "อย่ากดลิงก์", "รายงาน/บล็อก"],
+  },
+  {
+    channel: "email",
+    from: "notice@school.example.com",
+    subject: "ประกาศผลสอบ",
+    body: "ผลสอบประกาศบนหน้าเว็บไซต์นักเรียน กรุณาเข้าสู่ระบบตามปกติ",
+    links: [{ text: "Student portal", url: "https://school.example.com/portal" }],
+    verdict: "legit",
+    explanation: "ชี้ไปพอร์ทัลปกติ ไม่ขอข้อมูลผ่านฟอร์มลิงก์แปลก",
+    redFlags: ["ผลสอบทำให้รีบคลิกได้"],
+    safeActions: ["เข้าเว็บด้วยตัวเอง", "ตรวจโดเมน", "อย่าให้รหัสผ่าน/OTP"],
+  },
+  {
+    channel: "email",
+    from: "admin@school-portal.example.net",
+    subject: "ผลสอบออกแล้ว! Login ด่วน",
+    body: "เข้าสู่ระบบเพื่อดูผลสอบทันที",
+    links: [{ text: "Login", url: "https://school-portal.example.net/login" }],
+    verdict: "phishing",
+    explanation: "โดเมนเลียนแบบ + เร่งให้ล็อกอิน",
+    redFlags: ["โดเมนเลียนแบบ", "เร่งด่วน", "ชวนล็อกอินผ่านลิงก์"],
+    safeActions: ["เข้าเว็บโรงเรียนจริง", "อย่ากดลิงก์", "แจ้งครู/ผู้ดูแลระบบ"],
+  },
+];
 
 export async function POST(req: NextRequest) {
   const session = await getSessionFromRequest(req);
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json().catch(() => null);
+  const body = await req.json().catch(() => ({}));
 
-  const recentHashes: string[] = Array.isArray(body?.recentHashes)
-    ? body.recentHashes.slice(0, 600).map(String).filter(Boolean)
-    : [];
+  // ✅ เลือกจาก answered -> วน 20 ชิ้น
+  const answered = Number(body?.answered ?? 0);
+  const idx = Number.isFinite(answered) && answered >= 0 ? answered % INBOX_BANK.length : 0;
 
-  // ✅ รับ “ข้อความล่าสุด” จาก client เพื่อกันคล้าย
-  const recentTexts: string[] = Array.isArray(body?.recentTexts)
-    ? body.recentTexts.slice(0, 200).map(String).filter(Boolean)
-    : [];
+  const item = INBOX_BANK[idx];
+  const parsed = ItemSchema.safeParse(item);
 
-  const avoid = [
-    ...recentHashes.map((h) => `hash:${h.slice(0, 10)}`),
-    ...recentTexts.slice(-40),
-    "ธนาคาร",
-    "พัสดุ",
-    "OTP",
-    "บัญชี",
-    "ชำระเงิน",
-  ];
-
-  const recentTextGrams = recentTexts.map((t) => grams3(t));
-  const start = Date.now();
-  const HARD_LIMIT_MS = 12_000;
-
-  for (let attempt = 0; attempt < 12; attempt++) {
-    if (Date.now() - start > HARD_LIMIT_MS) break;
-
-    const item = await generateInboxAI(avoid);
-    if (!item) continue;
-
-    if (recentHashes.includes(item.hash)) continue;
-
-    // ✅ กัน “คล้าย” ด้วย 3-gram จาก subject+body
-    const pack = `${item.subject ?? ""}\n${item.body}`;
-    const gNew = grams3(pack);
-    let tooSimilar = false;
-    for (const gOld of recentTextGrams) {
-      if (jaccard(gNew, gOld) >= 0.62) {
-        tooSimilar = true;
-        break;
-      }
-    }
-    if (tooSimilar) continue;
-
-    return NextResponse.json({ item });
+  if (!parsed.success) {
+    const fallback = INBOX_BANK[0];
+    return NextResponse.json({ item: buildOut(ItemSchema.parse(fallback)) });
   }
 
-  return NextResponse.json(
-    { error: "AI สร้างข้อความใหม่ไม่สำเร็จ (กันซ้ำ/กันคล้ายเข้ม) กดลองใหม่อีกครั้ง" },
-    { status: 503 }
-  );
+  return NextResponse.json({ item: buildOut(parsed.data) });
 }

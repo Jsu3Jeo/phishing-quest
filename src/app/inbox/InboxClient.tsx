@@ -111,6 +111,7 @@ export default function InboxClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        answered: s.answered,
         recentHashes: (s.recentHashes ?? []).slice(-600),
         recentVerdicts: (s.recentVerdicts ?? []).slice(-200),
         recentTexts: (s.recentTexts ?? []).slice(-200), // ✅ ส่งให้ API กันคล้าย
