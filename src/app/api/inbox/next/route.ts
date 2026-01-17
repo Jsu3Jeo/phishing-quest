@@ -77,14 +77,20 @@ function parseItem(text: string) {
 
 async function getCachedInboxItem(recentHashes: string[], desired: Verdict) {
   try {
-    const rows = await prisma.question.findMany({ take: 200 });
+    const rows = await prisma.question.findMany({
+      take: 1200,
+      orderBy: { createdAt: "desc" },
+      select: { contentJson: true },
+    });
+
     const candidates: any[] = [];
 
     for (const r of rows) {
       try {
         const obj = JSON.parse(r.contentJson || "{}");
         if (obj?.kind !== "inbox") continue;
-        if (!obj?.hash || recentHashes.includes(String(obj.hash))) continue;
+        if (!obj?.hash) continue;
+        if (recentHashes.includes(String(obj.hash))) continue;
         if (obj?.verdict !== "legit" && obj?.verdict !== "phishing") continue;
         candidates.push(obj);
       } catch {}
@@ -92,18 +98,18 @@ async function getCachedInboxItem(recentHashes: string[], desired: Verdict) {
 
     if (candidates.length === 0) return null;
 
-    // ✅ ไม่บังคับ desired 100% เพื่อกัน pattern
-    // 60% จะ "prefer" desired ถ้ามี, 40% สุ่มจากทั้งหมด
+    // 60% prefer desired ถ้ามี, 40% สุ่มรวม
     const preferDesired = Math.random() < 0.6;
-
     if (preferDesired) {
       const desiredPool = candidates.filter((x) => x?.verdict === desired);
       if (desiredPool.length > 0) {
-        return desiredPool[Math.floor(Math.random() * desiredPool.length)];
+        const top = desiredPool.slice(0, Math.min(desiredPool.length, 250));
+        return top[Math.floor(Math.random() * top.length)];
       }
     }
 
-    return candidates[Math.floor(Math.random() * candidates.length)];
+    const top = candidates.slice(0, Math.min(candidates.length, 250));
+    return top[Math.floor(Math.random() * top.length)];
   } catch {
     return null;
   }

@@ -37,9 +37,7 @@ function coerceState(input: any): InboxState {
     wrong: typeof input?.wrong === "number" ? input.wrong : 0,
     recentHashes: Array.isArray(input?.recentHashes) ? input.recentHashes.map(String).filter(Boolean) : [],
     recentVerdicts: Array.isArray(input?.recentVerdicts)
-      ? input.recentVerdicts
-          .map((v: any) => (v === "legit" ? "legit" : v === "phishing" ? "phishing" : null))
-          .filter(Boolean)
+      ? input.recentVerdicts.map((v: any) => (v === "legit" ? "legit" : v === "phishing" ? "phishing" : null)).filter(Boolean)
       : [],
     redFlagsSeen: Array.isArray(input?.redFlagsSeen) ? input.redFlagsSeen.map(String).filter(Boolean) : [],
   };
@@ -94,8 +92,8 @@ export default function InboxClient() {
     const s = sArg ?? stateRef.current;
 
     try {
-      const recentHashes = (s.recentHashes ?? []).slice(-12);
-      const recentVerdicts = (s.recentVerdicts ?? []).slice(-10);
+      const recentHashes = (s.recentHashes ?? []).slice(-20);
+      const recentVerdicts = (s.recentVerdicts ?? []).slice(-12);
 
       const r = await fetch("/api/inbox/next", {
         method: "POST",
@@ -114,11 +112,23 @@ export default function InboxClient() {
     }
   };
 
+  // ✅ เริ่มใหม่: รีเซ็ตคะแนน แต่เก็บประวัติกันซ้ำ
   const resetLocal = async () => {
-    if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+    const prev = stateRef.current;
 
-    setState(DEFAULT_STATE);
-    stateRef.current = DEFAULT_STATE;
+    const fresh: InboxState = {
+      score: 0,
+      answered: 0,
+      correct: 0,
+      wrong: 0,
+      recentHashes: (prev.recentHashes ?? []).slice(-30),
+      recentVerdicts: (prev.recentVerdicts ?? []).slice(-30),
+      redFlagsSeen: (prev.redFlagsSeen ?? []).slice(-120),
+    };
+
+    setState(fresh);
+    stateRef.current = fresh;
+    saveState(fresh);
 
     setPicked(null);
     setShowExplain(false);
@@ -127,14 +137,13 @@ export default function InboxClient() {
     answeredRef.current = false;
     submittingRef.current = false;
 
-    await fetchNext(DEFAULT_STATE);
+    await fetchNext(fresh);
   };
 
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
 
-    // ✅ เข้า /inbox?new=1 -> รีเซ็ตก่อนเริ่ม
     if (params.get("new") === "1") {
       resetLocal();
       return;
@@ -158,9 +167,9 @@ export default function InboxClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        recentHashes: [...(prev.recentHashes ?? []), item.hash].slice(-40),
-        recentVerdicts: [...(prev.recentVerdicts ?? []), item.verdict].slice(-40),
-        redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(item.redFlags ?? [])].slice(-120),
+        recentHashes: [...(prev.recentHashes ?? []), item.hash].slice(-60),
+        recentVerdicts: [...(prev.recentVerdicts ?? []), item.verdict].slice(-60),
+        redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(item.redFlags ?? [])].slice(-200),
       };
       stateRef.current = next;
       saveState(next);
@@ -193,7 +202,6 @@ export default function InboxClient() {
         })
       );
 
-      // ✅ จบเกมแล้วล้าง local score
       localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/summary";
     }

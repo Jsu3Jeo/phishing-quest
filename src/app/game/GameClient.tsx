@@ -101,12 +101,22 @@ export default function GameClient() {
     }
   };
 
+  // ✅ เริ่มเกมใหม่: รีเซ็ตคะแนน แต่เก็บ history กันซ้ำ
   const resetLocal = async () => {
-    if (typeof window !== "undefined") localStorage.removeItem(STORAGE_KEY);
+    const prev = stateRef.current;
 
-    const fresh = safeState(null);
+    const fresh: GameState = {
+      score: 0,
+      answered: 0,
+      correct: 0,
+      wrong: 0,
+      historySignals: (prev.historySignals ?? []).slice(-30),
+      historyStems: (prev.historyStems ?? []).slice(-20),
+    };
+
     setState(fresh);
     stateRef.current = fresh;
+    saveState(fresh);
 
     setSelected(null);
     setShowExplain(false);
@@ -123,7 +133,7 @@ export default function GameClient() {
     didInit.current = true;
 
     if (params.get("new") === "1") {
-      resetLocal(); // reset แล้ว fetchNext(fresh) ในตัว
+      resetLocal();
       return;
     }
 
@@ -133,7 +143,6 @@ export default function GameClient() {
 
   const confirmAnswer = () => {
     if (!quiz || !selected || showExplain) return;
-
     if (answeredRef.current) return;
     answeredRef.current = true;
 
@@ -152,8 +161,8 @@ export default function GameClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-40),
-        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-20),
+        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-60),
+        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-40),
       };
       stateRef.current = next;
       saveState(next);
@@ -175,7 +184,8 @@ export default function GameClient() {
 
     if (typeof window !== "undefined") {
       localStorage.setItem("pq_last_summary_v1", JSON.stringify(s));
-      localStorage.removeItem(STORAGE_KEY); // ✅ จบเกมล้าง local score
+      // ✅ จบเกมแล้ว “ล้างคะแนน” แต่เก็บ history ไม่จำเป็นแล้ว
+      localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/summary";
     }
   };
