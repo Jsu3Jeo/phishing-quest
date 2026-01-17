@@ -6,27 +6,26 @@ import { getSessionFromRequest } from "@/lib/auth";
 import { openai } from "@/lib/openai";
 import { sha256, safeJsonParse } from "@/lib/utils";
 
-// ✅ กัน Edge runtime แปลกๆ + กัน static prerender
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const GenOptionSchema = z.object({
   id: z.string().min(1),
   text: z.string().min(2),
-  explanation: z.string().min(4), // ผ่อนอีกนิด กัน fail ง่าย
+  explanation: z.string().min(3),
 });
 
 const GenQuizSchema = z.object({
   stem: z.string().min(10),
   options: z.array(GenOptionSchema).length(4),
   correctId: z.string().min(1),
-  whyCorrect: z.string().min(6),
+  whyCorrect: z.string().min(5),
   signals: z.array(z.string()).min(2),
 });
 
 type GenQuiz = z.infer<typeof GenQuizSchema>;
 
-type QuizOut = {
+export type QuizOut = {
   kind: "quiz";
   stem: string;
   options: { label: "A" | "B" | "C" | "D"; text: string; isCorrect: boolean; explanation: string }[];
@@ -79,8 +78,11 @@ function parseGenQuiz(text: string): GenQuiz | null {
 }
 
 function buildQuizOut(gen: GenQuiz): QuizOut | null {
+  // กัน option ซ้ำ
   const optionTexts = gen.options.map((o) => normalizeText(o.text).toLowerCase());
   if (new Set(optionTexts).size < 4) return null;
+
+  // correctId ต้องอยู่จริง
   if (!gen.options.some((o) => o.id === gen.correctId)) return null;
 
   const shuffled = shuffle(gen.options);
@@ -96,6 +98,7 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   if (options.filter((o) => o.isCorrect).length !== 1) return null;
 
   const hash = hashQuiz(gen.stem, options.map((o) => o.text));
+
   return {
     kind: "quiz",
     stem: gen.stem,
@@ -107,7 +110,7 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   };
 }
 
-// ✅ Fallback: ไม่พึ่ง AI/DB (กันค้าง 503) — โจทย์มา “ทันที”
+// ✅ fallback โจทย์ทันที (ไม่ค้าง ไม่ 503)
 function fallbackQuiz(recentHashes: string[]): QuizOut {
   const bank = [
     {
@@ -145,39 +148,36 @@ function fallbackQuiz(recentHashes: string[]): QuizOut {
     },
   ];
 
-  // สุ่ม + กันซ้ำด้วย hash (ถ้าซ้ำก็วนหาใหม่)
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 10; i++) {
     const pick = bank[Math.floor(Math.random() * bank.length)];
     const correctIndex = Math.floor(Math.random() * 4);
 
-    const choices = new Array(4).fill(null);
+    const choices = new Array(4).fill("");
     choices[correctIndex] = pick.correct;
 
     const wrongs = shuffle(pick.wrong);
     let wi = 0;
     for (let k = 0; k < 4; k++) {
       if (choices[k]) continue;
-      choices[k] = wrongs[wi++];
+      choices[k] = wrongs[wi++] ?? "อย่ากดลิงก์/อย่าให้ข้อมูลส่วนตัว";
     }
-
-    const labels = ["A", "B", "C", "D"] as const;
-    const options = choices.map((text, idx) => ({
-      label: labels[idx],
-      text,
-      isCorrect: idx === correctIndex,
-      explanation:
-        idx === correctIndex
-          ? "เป็นการป้องกันที่ถูกต้องและลดความเสี่ยงโดนหลอก/โดนฝังมัลแวร์"
-          : "เสี่ยงโดนหลอกหรือโดนขโมยข้อมูล ควรเลือกแนวทางที่ตรวจสอบผ่านช่องทางทางการ",
-    }));
 
     const hash = hashQuiz(pick.stem, choices);
     if (recentHashes.includes(hash)) continue;
 
+    const labels = ["A", "B", "C", "D"] as const;
     return {
       kind: "quiz",
       stem: pick.stem,
-      options,
+      options: choices.map((text, idx) => ({
+        label: labels[idx],
+        text,
+        isCorrect: idx === correctIndex,
+        explanation:
+          idx === correctIndex
+            ? "เป็นการป้องกันที่ถูกต้องและลดความเสี่ยงโดนหลอก/โดนฝังมัลแวร์"
+            : "เสี่ยงโดนหลอกหรือโดนขโมยข้อมูล ควรเลือกแนวทางที่ตรวจสอบผ่านช่องทางทางการ",
+      })),
       whyCorrect: pick.why,
       signals: pick.signals,
       hash,
@@ -187,28 +187,29 @@ function fallbackQuiz(recentHashes: string[]): QuizOut {
 
   // กันสุดท้าย (แทบไม่เกิด)
   const pick = bank[0];
-  const hash = hashQuiz(pick.stem, [pick.correct, ...pick.wrong]);
+  const choices = [pick.correct, ...pick.wrong];
   return {
     kind: "quiz",
     stem: pick.stem,
     options: [
-      { label: "A", text: pick.correct, isCorrect: true, explanation: "ถูกต้องและปลอดภัยที่สุด" },
-      { label: "B", text: pick.wrong[0], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "C", text: pick.wrong[1], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "D", text: pick.wrong[2], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "A", text: choices[0], isCorrect: true, explanation: "ถูกต้องและปลอดภัยที่สุด" },
+      { label: "B", text: choices[1], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "C", text: choices[2], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "D", text: choices[3], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
     ],
     whyCorrect: pick.why,
     signals: pick.signals,
-    hash,
+    hash: hashQuiz(pick.stem, choices),
     source: "fallback",
   };
 }
 
-// ✅ ใช้ DB เฉพาะถ้า “ไม่สั่ง freshOnly”
+// (ถ้าคุณอยากใช้ DB cache บางครั้ง เปิดไว้ได้)
+// แต่ default ของเราจะ freshOnly=true จาก client แล้วไม่ใช้ DB เก่า
 async function getCachedQuiz(recentHashes: string[]) {
   try {
     const rows = await prisma.question.findMany({
-      take: 300,
+      take: 250,
       orderBy: { createdAt: "desc" },
       select: { contentJson: true },
     });
@@ -271,8 +272,9 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
 }
 `.trim();
 
+  // ✅ เร่งให้ไว: timeout สั้นลง (พลาด -> fallback ทันที)
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 25_000);
+  const t = setTimeout(() => controller.abort(), 8_500);
 
   try {
     const resp = await openai.chat.completions.create(
@@ -282,10 +284,10 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
           { role: "system", content: "You output ONLY valid JSON. No markdown." },
           { role: "user", content: prompt },
         ],
-        // ✅ สำคัญ: บังคับ JSON
+        // ถ้ารุ่นรองรับจะยิ่งกัน JSON หลุด
         response_format: { type: "json_object" } as any,
         temperature: 0.65,
-        max_tokens: 700,
+        max_tokens: 650,
       },
       { signal: controller.signal } as any
     );
@@ -309,48 +311,46 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
 
   const recentHashes: string[] = Array.isArray(body?.recentHashes)
-    ? body.recentHashes.slice(0, 120).map(String).filter(Boolean)
+    ? body.recentHashes.slice(0, 160).map(String).filter(Boolean)
     : [];
 
   const recentSignals: string[] = Array.isArray(body?.recentSignals)
-    ? body.recentSignals.slice(0, 60).map(String).filter(Boolean)
+    ? body.recentSignals.slice(0, 80).map(String).filter(Boolean)
     : [];
 
   const recentStems: string[] = Array.isArray(body?.recentStems)
-    ? body.recentStems.slice(0, 60).map(String).filter(Boolean)
+    ? body.recentStems.slice(0, 80).map(String).filter(Boolean)
     : [];
 
-  const freshOnly = body?.freshOnly === true; // ✅ ส่งมาจาก client ถ้าอยาก “ไม่ใช้ DB เก่า”
+  const freshOnly = body?.freshOnly === true;
 
-  // ✅ ถ้าไม่ freshOnly ค่อยหยิบจาก DB ก่อนเพื่อให้เร็ว
+  // ✅ ถ้าไม่ freshOnly ค่อยใช้ DB เร่งความเร็ว (ตอนนี้ client เราจะส่ง freshOnly=true)
   if (!freshOnly) {
     const cached = await getCachedQuiz(recentHashes);
     if (cached) return NextResponse.json({ quiz: cached });
   }
 
-  // ✅ สร้างใหม่ด้วย AI (พยายาม 4 ครั้ง)
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const q = await generateQuizAI(recentSignals.slice(-20), recentStems.slice(-25));
+  // ✅ พยายาม AI แค่ 2 ครั้ง (ไว) แล้วไม่ค้าง
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const q = await generateQuizAI(recentSignals.slice(-25), recentStems.slice(-30));
     if (!q) continue;
 
     if (recentHashes.includes(q.hash)) continue;
 
-    // บันทึกลง DB (เพื่อให้อนาคตยิ่งเร็วขึ้น)
-    try {
-      await prisma.question.create({
+    // บันทึกลง DB แบบ best-effort
+    prisma.question
+      .create({
         data: {
           hash: q.hash,
           contentJson: JSON.stringify({ ...q, kind: "quiz" }),
         },
-      });
-    } catch {
-      // ignore (unique conflict ฯลฯ)
-    }
+      })
+      .catch(() => {});
 
     return NextResponse.json({ quiz: q });
   }
 
-  // ✅ สุดท้าย: ไม่ค้างแล้ว — ส่ง fallback ทันที
+  // ✅ ไม่ fail แล้ว: ส่ง fallback ทันที
   const fb = fallbackQuiz(recentHashes);
   return NextResponse.json({ quiz: fb });
 }

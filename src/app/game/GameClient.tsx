@@ -49,7 +49,6 @@ function normalizeText(s: string) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
-/** ✅ กันพัง: ถ้า API ไม่ส่ง hash มา จะทำ hash ฝั่ง client ชั่วคราว */
 function computeClientHash(q: Quiz) {
   const base =
     normalizeText((q as any)?.stem) +
@@ -81,9 +80,46 @@ export default function GameClient() {
   const submittingRef = useRef(false);
   const fetchingRef = useRef(false);
 
+  // ✅ prefetch
+  const prefetchedRef = useRef<Quiz | null>(null);
+  const prefetchingRef = useRef(false);
+
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  const callNextApi = async (s: GameState): Promise<Quiz> => {
+    const r = await fetch("/api/quiz/next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        freshOnly: true, // ✅ ไม่ใช้ DB เก่า (แต่ server ยังบันทึกลง DB)
+        recentHashes: (s.recentHashes ?? []).slice(-120),
+        recentSignals: (s.historySignals ?? []).slice(-25),
+        recentStems: (s.historyStems ?? []).slice(-40),
+      }),
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error || "สร้างโจทย์ไม่สำเร็จ");
+    return data.quiz as Quiz;
+  };
+
+  const acceptQuiz = (q: Quiz) => {
+    setQuiz(q);
+
+    const h = (q as any)?.hash || computeClientHash(q);
+
+    setState((prev) => {
+      const next: GameState = {
+        ...prev,
+        recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-200),
+      };
+      stateRef.current = next;
+      saveState(next);
+      return next;
+    });
+  };
 
   const fetchNext = async (sArg?: GameState) => {
     if (fetchingRef.current) return;
@@ -95,44 +131,41 @@ export default function GameClient() {
     setShowExplain(false);
     answeredRef.current = false;
 
-    const s = sArg ?? stateRef.current;
-
     try {
-      const r = await fetch("/api/quiz/next", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          recentHashes: (s.recentHashes ?? []).slice(-60),
-          recentSignals: (s.historySignals ?? []).slice(-20),
-          recentStems: (s.historyStems ?? []).slice(-30),
-        }),
-      });
+      // ✅ ถ้ามี prefetch แล้ว ใช้ทันที (เร็วมาก)
+      if (prefetchedRef.current) {
+        const q = prefetchedRef.current;
+        prefetchedRef.current = null;
+        acceptQuiz(q);
+        return;
+      }
 
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data?.error || "สร้างโจทย์ไม่สำเร็จ");
-
-      const q = data.quiz as Quiz;
-      setQuiz(q);
-
-      // ✅ hash กันซ้ำ: ใช้ของ server ก่อน ถ้าไม่มี -> ทำเอง
-      const h = (q as any)?.hash || computeClientHash(q);
-
-      // ✅ ทันทีที่ “รับโจทย์” ให้บันทึก hash กันซ้ำ
-      setState((prev) => {
-        const next: GameState = {
-          ...prev,
-          recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-120),
-        };
-        stateRef.current = next;
-        saveState(next);
-        return next;
-      });
+      const s = sArg ?? stateRef.current;
+      const q = await callNextApi(s);
+      acceptQuiz(q);
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setQuiz(null);
     } finally {
       setLoading(false);
       fetchingRef.current = false;
+    }
+  };
+
+  const prefetchNext = async () => {
+    if (prefetchingRef.current) return;
+    if (prefetchedRef.current) return;
+
+    prefetchingRef.current = true;
+    try {
+      const s = stateRef.current;
+      const q = await callNextApi(s);
+      prefetchedRef.current = q;
+    } catch {
+      // เงียบไว้ ไม่ต้องทำให้ผู้เล่นเห็น error
+      prefetchedRef.current = null;
+    } finally {
+      prefetchingRef.current = false;
     }
   };
 
@@ -144,10 +177,10 @@ export default function GameClient() {
       answered: 0,
       correct: 0,
       wrong: 0,
-      // ✅ เก็บประวัติไว้กันซ้ำ (ตามที่คุณตั้งใจ)
-      historySignals: (prev.historySignals ?? []).slice(-80),
-      historyStems: (prev.historyStems ?? []).slice(-60),
-      recentHashes: (prev.recentHashes ?? []).slice(-120),
+      // ✅ เก็บกันซ้ำต่อ
+      historySignals: (prev.historySignals ?? []).slice(-120),
+      historyStems: (prev.historyStems ?? []).slice(-100),
+      recentHashes: (prev.recentHashes ?? []).slice(-200),
     };
 
     setState(fresh);
@@ -161,6 +194,7 @@ export default function GameClient() {
     answeredRef.current = false;
     submittingRef.current = false;
 
+    prefetchedRef.current = null;
     await fetchNext(fresh);
   };
 
@@ -168,8 +202,10 @@ export default function GameClient() {
     if (didInit.current) return;
     didInit.current = true;
 
-    // ✅ ตัด useSearchParams ออกให้ build ผ่านชัวร์
-    const isNew = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
+    // ✅ ไม่ใช้ useSearchParams (กัน build error)
+    const isNew =
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
+
     if (isNew) {
       resetLocal();
       return;
@@ -199,14 +235,17 @@ export default function GameClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-120),
-        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-90),
+        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-150),
+        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-120),
         recentHashes: prev.recentHashes ?? [],
       };
       stateRef.current = next;
       saveState(next);
       return next;
     });
+
+    // ✅ เฉลยปุ๊บ เริ่ม prefetch ข้อถัดไปทันที
+    setTimeout(() => prefetchNext(), 0);
   };
 
   const endGame = async () => {
@@ -223,8 +262,6 @@ export default function GameClient() {
 
     if (typeof window !== "undefined") {
       localStorage.setItem("pq_last_summary_v1", JSON.stringify(s));
-      // ✅ ไม่ลบ STORAGE_KEY ถ้าคุณอยากกันซ้ำข้ามเกมด้วย
-      // localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/summary";
     }
   };
