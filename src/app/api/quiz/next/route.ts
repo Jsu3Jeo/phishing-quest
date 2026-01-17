@@ -9,20 +9,21 @@ import { sha256, safeJsonParse } from "@/lib/utils";
 const GenOptionSchema = z.object({
   id: z.string().min(1),
   text: z.string().min(2),
-  explanation: z.string().min(6), // ผ่อนนิดนึง กัน fail ง่าย
+  explanation: z.string().min(3), // ✅ ผ่อนอีกนิด กัน fail
 });
 
 const GenQuizSchema = z.object({
-  stem: z.string().min(12),
+  stem: z.string().min(8), // ✅ ผ่อนอีกนิด กัน fail
   options: z.array(GenOptionSchema).length(4),
   correctId: z.string().min(1),
-  whyCorrect: z.string().min(8),
-  signals: z.array(z.string()).min(2),
+  whyCorrect: z.string().min(5),
+  signals: z.array(z.string()).min(2).max(6),
 });
 
 type GenQuiz = z.infer<typeof GenQuizSchema>;
 
 type QuizOut = {
+  kind: "quiz";
   stem: string;
   options: { label: "A" | "B" | "C" | "D"; text: string; isCorrect: boolean; explanation: string }[];
   whyCorrect: string;
@@ -55,7 +56,7 @@ function extractLikelyJson(text: string) {
   return null;
 }
 
-function parseGenQuiz(text: string) {
+function parseGenQuiz(text: string): GenQuiz | null {
   const p1 = safeJsonParse<unknown>(text);
   if (p1.ok) {
     const z1 = GenQuizSchema.safeParse(p1.data);
@@ -92,88 +93,51 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
 
   if (options.filter((o) => o.isCorrect).length !== 1) return null;
 
-  const quizNoHash = {
+  const hash = hashQuiz({ stem: gen.stem, options });
+  return {
+    kind: "quiz",
     stem: gen.stem,
     options,
     whyCorrect: gen.whyCorrect,
     signals: gen.signals,
+    hash,
   };
-
-  const hash = hashQuiz({ stem: quizNoHash.stem, options: quizNoHash.options });
-  return { ...quizNoHash, hash };
 }
 
-// ✅ cache: กันซ้ำด้วย hash เป็นหลัก (เด็ดขาด)
-async function getCachedQuiz(recentHashes: string[], recentStems: string[]) {
-  try {
-    // ดึงเยอะขึ้น และเรียงใหม่ก่อน เพื่อไม่วนแต่ของเก่า
-    const rows = await prisma.question.findMany({
-      take: 600,
-      orderBy: { createdAt: "desc" },
-      select: { contentJson: true },
-    });
-
-    const candidates: any[] = [];
-    for (const r of rows) {
-      try {
-        const obj = JSON.parse(r.contentJson || "{}");
-        if (obj?.kind !== "quiz") continue;
-        if (!obj?.hash || !obj?.stem || !obj?.options) continue;
-        candidates.push(obj);
-      } catch {}
-    }
-
-    // ✅ ห้ามซ้ำ hash ใน session เด็ดขาด
-    const filtered = candidates.filter((q) => {
-      const h = String(q.hash || "");
-      if (!h) return false;
-      if (recentHashes.includes(h)) return false;
-
-      // กันซ้ำ stem แบบเสริม (เผื่อ hash ไม่ส่งมาบางเคส)
-      const stem = String(q.stem || "");
-      if (stem && recentStems.includes(stem)) return false;
-
-      return true;
-    });
-
-    const pool = filtered.length > 0 ? filtered : [];
-    if (pool.length === 0) return null;
-
-    // ✅ สุ่มจาก top ช่วงล่าสุด เพื่อกระจาย
-    const top = pool.slice(0, Math.min(pool.length, 250));
-    return top[Math.floor(Math.random() * top.length)];
-  } catch {
-    return null;
-  }
-}
-
-async function generateQuiz(avoidSignals: string[], avoidStems: string[]) {
+async function generateQuizFast(avoidSignals: string[], avoidStems: string[]) {
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
   const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const themes = [
+    "ธนาคาร/บัตรเครดิต",
+    "ขนส่งพัสดุ/ค่าส่ง",
+    "Social/บัญชีล็อก",
+    "Work email/เอกสาร",
+    "OTP/รหัสยืนยัน",
+    "Marketplace/ซื้อขาย",
+    "Streaming/ต่ออายุ",
+    "Travel/โรงแรม/ตั๋ว",
+    "Government/ภาษี/กรม",
+    "Telecom/แพ็กเน็ต",
+  ];
+  const theme = themes[Math.floor(Math.random() * themes.length)];
 
   const prompt = `
 NONCE=${nonce}
-คุณคือครูสอน cybersecurity ออกโจทย์ฝึกจับ phishing แบบ "สถานการณ์" 1 ข้อ
+ออกโจทย์ฝึกจับ phishing แบบสถานการณ์ 1 ข้อ (ไทยเป็นหลัก) ธีม: ${theme}
 
-เงื่อนไขสำคัญ:
-- ห้ามใช้เทมเพลตเดิมซ้ำ (อย่าเขียนรูปแบบเดิมวน)
-- สุ่มธีมให้หลากหลาย: ธนาคาร, ขนส่งพัสดุ, social, work email, OTP, marketplace, streaming, travel, gov, telecom แบบสุ่มๆ
-- 4 ตัวเลือกต้องต่างกันมาก (ห้ามคำตอบคล้ายกัน)
-- explanation สั้นแต่ชัดรายข้อ
-- correctId ต้องอ้างถึง option.id (o1/o2/o3/o4)
-- signals อย่างน้อย 2
+ข้อกำหนด:
+- ตอบเป็น JSON อย่างเดียว
+- 4 ตัวเลือกต้องต่างกันชัดเจน
+- correctId ต้องเป็น o1/o2/o3/o4 ที่มีอยู่จริง
+- หลีกเลี่ยง stem ซ้ำ:
+${avoidStems.slice(-20).map((s) => `- ${s}`).join("\n")}
+- หลีกเลี่ยง signals ซ้ำ:
+${avoidSignals.slice(-20).map((s) => `- ${s}`).join("\n")}
 
-หลีกเลี่ยง stem ที่คล้ายของเดิม:
-${avoidStems.map((s) => `- ${s}`).join("\n")}
-
-หลีกเลี่ยง signals ซ้ำเยอะ:
-${avoidSignals.map((s) => `- ${s}`).join("\n")}
-
-ตอบเป็น JSON เท่านั้น ห้าม markdown/ข้อความอื่น
-
+JSON:
 {
-  "stem": "คำถาม...",
+  "stem": "...",
   "options": [
     {"id":"o1","text":"...","explanation":"..."},
     {"id":"o2","text":"...","explanation":"..."},
@@ -181,24 +145,27 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
     {"id":"o4","text":"...","explanation":"..."}
   ],
   "correctId": "o2",
-  "whyCorrect": "สรุปว่าทำไมคำตอบนี้ถูกที่สุด",
-  "signals": ["สัญญาณเตือน 1", "สัญญาณเตือน 2"]
+  "whyCorrect": "...",
+  "signals": ["...", "..."]
 }
 `.trim();
 
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 20_000); // ✅ เพิ่มเวลาให้ Vercel/Neon ไม่ fail ง่าย
+  const t = setTimeout(() => controller.abort(), 12_000);
 
   try {
     const resp = await openai.chat.completions.create(
       {
         model,
         messages: [
-          { role: "system", content: "You output ONLY valid JSON. No markdown." },
+          { role: "system", content: "Return ONLY valid JSON. No markdown. No extra text." },
           { role: "user", content: prompt },
         ],
-        temperature: 0.7,
-      },
+        // ✅ บังคับ JSON (ช่วยลด parse fail มาก)
+        response_format: { type: "json_object" } as any,
+        temperature: 0.65,
+        max_tokens: 650, // ✅ เร็วขึ้น
+      } as any,
       { signal: controller.signal } as any
     );
 
@@ -220,44 +187,37 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => null);
 
-  // ✅ รับ recentHashes จาก client เพื่อกันซ้ำแบบเด็ดขาด
   const recentHashes: string[] = Array.isArray(body?.recentHashes)
-    ? body.recentHashes.slice(0, 80).map(String).filter(Boolean)
+    ? body.recentHashes.slice(0, 120).map(String).filter(Boolean)
     : [];
 
   const recentSignals: string[] = Array.isArray(body?.recentSignals)
-    ? body.recentSignals.slice(0, 40).map(String).filter(Boolean)
+    ? body.recentSignals.slice(0, 60).map(String).filter(Boolean)
     : [];
 
   const recentStems: string[] = Array.isArray(body?.recentStems)
-    ? body.recentStems.slice(0, 30).map(String).filter(Boolean)
+    ? body.recentStems.slice(0, 80).map(String).filter(Boolean)
     : [];
 
-  // ✅ FAST PATH: DB cache ก่อน (ห้ามซ้ำ hash)
-  const cached = await getCachedQuiz(recentHashes, recentStems);
-  if (cached) return NextResponse.json({ quiz: cached });
-
-  // ✅ ถ้าไม่มี cache เลย ค่อยยิง AI แล้วบันทึกลง DB
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const q = await generateQuiz(recentSignals.slice(-20), recentStems.slice(-20));
+  // ✅ ไม่อ่าน DB เก่าแล้ว: “สร้างใหม่เท่านั้น”
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const q = await generateQuizFast(recentSignals, recentStems);
     if (!q) continue;
 
-    // ห้ามซ้ำกับ session ของผู้เล่น
+    // ✅ กันซ้ำใน session แบบเด็ดขาด
     if (recentHashes.includes(q.hash)) continue;
 
+    // ✅ กันซ้ำกับ DB เฉพาะตอนบันทึก
     const exists = await prisma.question.findUnique({ where: { hash: q.hash } });
     if (exists) continue;
 
+    // ✅ บันทึก (แต่ไม่เอามา cache)
     await prisma.question.create({
-      data: {
-        hash: q.hash,
-        contentJson: JSON.stringify({ kind: "quiz", ...q }),
-      },
+      data: { hash: q.hash, contentJson: JSON.stringify(q) },
     });
 
-    return NextResponse.json({ quiz: { kind: "quiz", ...q } });
+    return NextResponse.json({ quiz: q });
   }
 
-  // ✅ ไม่ยอมซ้ำ: ถ้าหาไม่ได้จริง ๆ ให้ error ไปเลย (ตามที่คุณต้องการ “ไม่ซ้ำเลย”)
   return NextResponse.json({ error: "AI สร้างโจทย์ไม่สำเร็จ ลองใหม่อีกครั้ง" }, { status: 503 });
 }
