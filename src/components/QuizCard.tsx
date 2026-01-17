@@ -11,12 +11,13 @@ export type QuizOption = {
 };
 
 export type Quiz = {
+  kind?: "quiz";
   stem: string;
-  scenarioType: "email" | "sms" | "website" | "social" | "call";
   options: QuizOption[];
   signals: string[];
-  takeaway: string;
-  hash: string;
+  whyCorrect: string; // ✅ ใช้ของจริงที่ API ส่งมา
+  hash?: string;
+  source?: "ai" | "fallback" | "db";
 };
 
 export function QuizCard({
@@ -34,10 +35,7 @@ export function QuizCard({
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-      <div className="text-xs uppercase tracking-widest text-white/60">
-        Scenario: {quiz.scenarioType}
-      </div>
-      <h2 className="mt-2 text-xl font-semibold leading-snug">{quiz.stem}</h2>
+      <h2 className="text-xl font-semibold leading-snug">{quiz.stem}</h2>
 
       <div className="mt-5 grid gap-3">
         {quiz.options.map((o) => {
@@ -90,7 +88,7 @@ export function QuizCard({
             ))}
           </ul>
           <div className="mt-3 text-sm text-white/80">
-            <span className="font-semibold">จำง่าย:</span> {quiz.takeaway}
+            <span className="font-semibold">สรุป:</span> {quiz.whyCorrect}
           </div>
         </div>
       )}

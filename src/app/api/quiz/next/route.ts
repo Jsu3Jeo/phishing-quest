@@ -48,8 +48,11 @@ function normalizeText(s: string) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
+/** ✅ สำคัญ: hash ต้อง “ไม่ขึ้นกับลำดับตัวเลือก” กันโจทย์เดิมได้จริง */
 function hashQuiz(stem: string, optionTexts: string[]) {
-  const base = normalizeText(stem) + "\n" + optionTexts.map(normalizeText).join("\n");
+  const stemN = normalizeText(stem).toLowerCase();
+  const optsN = optionTexts.map((t) => normalizeText(t).toLowerCase()).sort(); // ✅ sort!
+  const base = stemN + "\n" + optsN.join("\n");
   return sha256(base);
 }
 
@@ -78,11 +81,8 @@ function parseGenQuiz(text: string): GenQuiz | null {
 }
 
 function buildQuizOut(gen: GenQuiz): QuizOut | null {
-  // กัน option ซ้ำ
   const optionTexts = gen.options.map((o) => normalizeText(o.text).toLowerCase());
   if (new Set(optionTexts).size < 4) return null;
-
-  // correctId ต้องอยู่จริง
   if (!gen.options.some((o) => o.id === gen.correctId)) return null;
 
   const shuffled = shuffle(gen.options);
@@ -98,7 +98,6 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   if (options.filter((o) => o.isCorrect).length !== 1) return null;
 
   const hash = hashQuiz(gen.stem, options.map((o) => o.text));
-
   return {
     kind: "quiz",
     stem: gen.stem,
@@ -110,45 +109,33 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   };
 }
 
-// ✅ fallback โจทย์ทันที (ไม่ค้าง ไม่ 503)
+/** ✅ fallback: ไม่ค้าง ไม่ 503 */
 function fallbackQuiz(recentHashes: string[]): QuizOut {
   const bank = [
     {
       stem: "คุณได้รับ SMS แจ้งว่า “พัสดุติดศุลกากร ให้ชำระ 9 บาทภายใน 30 นาที” พร้อมลิงก์ย่อ คุณควรทำอย่างไรดีที่สุด?",
       correct: "เปิดเว็บ/แอปขนส่งทางการเอง ตรวจเลขพัสดุ และอย่ากดลิงก์จาก SMS",
-      wrong: [
-        "กดลิงก์แล้วจ่ายทันทีเพราะจำนวนเงินน้อย",
-        "ส่งต่อ SMS ให้เพื่อนช่วยเช็คให้",
-        "ตอบกลับข้อความเพื่อขอรายละเอียดเพิ่มเติม",
-      ],
+      wrong: ["กดลิงก์แล้วจ่ายทันทีเพราะจำนวนเงินน้อย", "ส่งต่อ SMS ให้เพื่อนช่วยเช็คให้", "ตอบกลับข้อความเพื่อขอรายละเอียดเพิ่มเติม"],
       signals: ["ลิงก์ย่อ/ไม่ใช่โดเมนทางการ", "เร่งด่วนให้ทำภายในเวลา", "เรียกชำระเงินเล็กน้อยเพื่อหลอกให้ชิน"],
       why: "วิธีที่ปลอดภัยคือเข้าแอป/เว็บทางการด้วยตัวเอง ไม่คลิกลิงก์ในข้อความเร่งด่วน",
     },
     {
       stem: "มีอีเมลจาก “IT Support” ขอให้คุณล็อกอินเพื่ออัปเดตรหัสผ่าน โดยให้กดปุ่ม Login ในอีเมล คุณควรตรวจอะไรเป็นอันดับแรก?",
       correct: "ตรวจโดเมนผู้ส่ง/ลิงก์จริง (hover) ว่าเป็นโดเมนองค์กรจริงหรือไม่",
-      wrong: [
-        "ดูแค่ว่ามีโลโก้บริษัทหรือไม่",
-        "ดูว่าเขียนภาษาไทยถูกต้องหรือเปล่า",
-        "รีบทำตามเพราะกลัวโดนล็อกบัญชี",
-      ],
+      wrong: ["ดูแค่ว่ามีโลโก้บริษัทหรือไม่", "ดูว่าเขียนภาษาไทยถูกต้องหรือเปล่า", "รีบทำตามเพราะกลัวโดนล็อกบัญชี"],
       signals: ["ขอให้ล็อกอินผ่านลิงก์ในอีเมล", "ขู่ให้รีบทำ", "ปลอมเป็นฝ่าย IT"],
       why: "การตรวจโดเมน/ลิงก์จริงช่วยจับการปลอมหน้าเว็บได้ดีที่สุดก่อนทำอะไรต่อ",
     },
     {
       stem: "คุณได้รับข้อความในโซเชียลว่า “คุณถูกรางวัล” พร้อมไฟล์แนบ .zip และบอกให้เปิดเพื่อรับสิทธิ์ คุณควรทำอย่างไร?",
       correct: "ไม่เปิดไฟล์แนบ และรายงาน/บล็อกบัญชีผู้ส่ง",
-      wrong: [
-        "เปิดไฟล์ก่อน แล้วค่อยสแกนไวรัสทีหลัง",
-        "ส่งไฟล์ไปให้อีกคนลองเปิดแทน",
-        "แตกไฟล์เฉพาะในมือถือจะปลอดภัยกว่า",
-      ],
+      wrong: ["เปิดไฟล์ก่อน แล้วค่อยสแกนไวรัสทีหลัง", "ส่งไฟล์ไปให้อีกคนลองเปิดแทน", "แตกไฟล์เฉพาะในมือถือจะปลอดภัยกว่า"],
       signals: ["ไฟล์แนบ .zip จากแหล่งไม่รู้จัก", "ล่อด้วยของฟรี/รางวัล", "ชวนให้เปิดไฟล์ทันที"],
       why: "ไฟล์แนบจากแหล่งไม่รู้จักเสี่ยงมัลแวร์สูง ทางที่ถูกคือไม่เปิดและรายงาน",
     },
   ];
 
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 12; i++) {
     const pick = bank[Math.floor(Math.random() * bank.length)];
     const correctIndex = Math.floor(Math.random() * 4);
 
@@ -185,54 +172,22 @@ function fallbackQuiz(recentHashes: string[]): QuizOut {
     };
   }
 
-  // กันสุดท้าย (แทบไม่เกิด)
   const pick = bank[0];
-  const choices = [pick.correct, ...pick.wrong];
+  const hash = hashQuiz(pick.stem, [pick.correct, ...pick.wrong]);
   return {
     kind: "quiz",
     stem: pick.stem,
     options: [
-      { label: "A", text: choices[0], isCorrect: true, explanation: "ถูกต้องและปลอดภัยที่สุด" },
-      { label: "B", text: choices[1], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "C", text: choices[2], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "D", text: choices[3], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "A", text: pick.correct, isCorrect: true, explanation: "ถูกต้องและปลอดภัยที่สุด" },
+      { label: "B", text: pick.wrong[0], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "C", text: pick.wrong[1], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
+      { label: "D", text: pick.wrong[2], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
     ],
     whyCorrect: pick.why,
     signals: pick.signals,
-    hash: hashQuiz(pick.stem, choices),
+    hash,
     source: "fallback",
   };
-}
-
-// (ถ้าคุณอยากใช้ DB cache บางครั้ง เปิดไว้ได้)
-// แต่ default ของเราจะ freshOnly=true จาก client แล้วไม่ใช้ DB เก่า
-async function getCachedQuiz(recentHashes: string[]) {
-  try {
-    const rows = await prisma.question.findMany({
-      take: 250,
-      orderBy: { createdAt: "desc" },
-      select: { contentJson: true },
-    });
-
-    const candidates: QuizOut[] = [];
-    for (const r of rows) {
-      try {
-        const obj = JSON.parse(r.contentJson || "{}");
-        if (obj?.kind !== "quiz") continue;
-        if (!obj?.hash) continue;
-        candidates.push(obj);
-      } catch {}
-    }
-
-    const filtered = candidates.filter((q) => !recentHashes.includes(String(q.hash)));
-    if (filtered.length === 0) return null;
-
-    const top = filtered.slice(0, Math.min(filtered.length, 120));
-    const picked = top[Math.floor(Math.random() * top.length)];
-    return { ...picked, source: "db" as const };
-  } catch {
-    return null;
-  }
 }
 
 async function generateQuizAI(avoidSignals: string[], avoidStems: string[]) {
@@ -272,9 +227,9 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
 }
 `.trim();
 
-  // ✅ เร่งให้ไว: timeout สั้นลง (พลาด -> fallback ทันที)
+  // ✅ เร็ว: timeout สั้น ถ้าพลาด -> fallback ทันที
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 8_500);
+  const t = setTimeout(() => controller.abort(), 6500);
 
   try {
     const resp = await openai.chat.completions.create(
@@ -284,7 +239,6 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
           { role: "system", content: "You output ONLY valid JSON. No markdown." },
           { role: "user", content: prompt },
         ],
-        // ถ้ารุ่นรองรับจะยิ่งกัน JSON หลุด
         response_format: { type: "json_object" } as any,
         temperature: 0.65,
         max_tokens: 650,
@@ -311,46 +265,38 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
 
   const recentHashes: string[] = Array.isArray(body?.recentHashes)
-    ? body.recentHashes.slice(0, 160).map(String).filter(Boolean)
+    ? body.recentHashes.slice(0, 300).map(String).filter(Boolean)
     : [];
 
   const recentSignals: string[] = Array.isArray(body?.recentSignals)
-    ? body.recentSignals.slice(0, 80).map(String).filter(Boolean)
+    ? body.recentSignals.slice(0, 150).map(String).filter(Boolean)
     : [];
 
   const recentStems: string[] = Array.isArray(body?.recentStems)
-    ? body.recentStems.slice(0, 80).map(String).filter(Boolean)
+    ? body.recentStems.slice(0, 150).map(String).filter(Boolean)
     : [];
 
+  // ✅ คุณต้องการ “ไม่เอา DB เก่า” -> ใช้ freshOnly จาก client
   const freshOnly = body?.freshOnly === true;
 
-  // ✅ ถ้าไม่ freshOnly ค่อยใช้ DB เร่งความเร็ว (ตอนนี้ client เราจะส่ง freshOnly=true)
-  if (!freshOnly) {
-    const cached = await getCachedQuiz(recentHashes);
-    if (cached) return NextResponse.json({ quiz: cached });
-  }
-
-  // ✅ พยายาม AI แค่ 2 ครั้ง (ไว) แล้วไม่ค้าง
+  // ✅ กันซ้ำใน session “เด็ดขาด” แม้ AI สร้างซ้ำ/DB ซ้ำ
+  // พยายาม AI แค่ 2 ครั้ง เร็วๆ
   for (let attempt = 0; attempt < 2; attempt++) {
-    const q = await generateQuizAI(recentSignals.slice(-25), recentStems.slice(-30));
+    const q = await generateQuizAI(recentSignals.slice(-30), recentStems.slice(-40));
     if (!q) continue;
 
     if (recentHashes.includes(q.hash)) continue;
 
-    // บันทึกลง DB แบบ best-effort
+    // บันทึกลง DB แบบ best-effort (ไม่รอให้ช้า)
     prisma.question
       .create({
-        data: {
-          hash: q.hash,
-          contentJson: JSON.stringify({ ...q, kind: "quiz" }),
-        },
+        data: { hash: q.hash, contentJson: JSON.stringify({ ...q, kind: "quiz" }) },
       })
       .catch(() => {});
 
     return NextResponse.json({ quiz: q });
   }
 
-  // ✅ ไม่ fail แล้ว: ส่ง fallback ทันที
-  const fb = fallbackQuiz(recentHashes);
-  return NextResponse.json({ quiz: fb });
+  // ✅ ไม่มีแล้ว “AI สร้างโจทย์ไม่สำเร็จ” แบบค้าง — ส่ง fallback ทันที
+  return NextResponse.json({ quiz: fallbackQuiz(recentHashes) });
 }

@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { MessageCard, type InboxItem } from "@/components/MessageCard";
+import { sha256 } from "@/lib/utils";
 
 type Verdict = "legit" | "phishing";
 
@@ -17,7 +17,7 @@ type InboxState = {
   redFlagsSeen: string[];
 };
 
-const STORAGE_KEY = "pq_inbox_v2";
+const STORAGE_KEY = "pq_inbox_v3";
 
 const DEFAULT_STATE: InboxState = {
   score: 0,
@@ -59,9 +59,19 @@ function saveState(s: InboxState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
 }
 
-export default function InboxClient() {
-  const params = useSearchParams();
+function normalizeText(s: string) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
 
+// กันพัง: ถ้า item ไม่มี hash (เผื่อ)
+function computeClientHash(item: InboxItem) {
+  const base =
+    `${normalizeText((item as any)?.channel)}\n${normalizeText((item as any)?.from)}\n${normalizeText((item as any)?.subject)}\n${normalizeText((item as any)?.body)}\n` +
+    (((item as any)?.links ?? []) as any[]).map((l) => `${normalizeText(l.text)}|${normalizeText(l.url)}`).join("\n");
+  return sha256(base);
+}
+
+export default function InboxClient() {
   const [item, setItem] = useState<InboxItem | null>(null);
   const [picked, setPicked] = useState<Verdict | null>(null);
   const [showExplain, setShowExplain] = useState(false);
@@ -77,42 +87,95 @@ export default function InboxClient() {
   const didInit = useRef(false);
   const answeredRef = useRef(false);
   const submittingRef = useRef(false);
+  const fetchingRef = useRef(false);
+
+  // prefetch
+  const prefetchedRef = useRef<InboxItem | null>(null);
+  const prefetchingRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
+  const callNextApi = async (s: InboxState): Promise<InboxItem> => {
+    const r = await fetch("/api/inbox/next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recentHashes: (s.recentHashes ?? []).slice(-200),
+        recentVerdicts: (s.recentVerdicts ?? []).slice(-80),
+      }),
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error || "สร้างข้อความไม่สำเร็จ");
+    return data.item as InboxItem;
+  };
+
+  const acceptItem = (it: InboxItem) => {
+    setItem(it);
+
+    const h = (it as any)?.hash || computeClientHash(it);
+
+    // ✅ สำคัญสุด: บันทึก hash ทันทีที่ “รับโจทย์” กันซ้ำข้อถัดไป
+    setState((prev) => {
+      const next: InboxState = {
+        ...prev,
+        recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-300),
+      };
+      stateRef.current = next;
+      saveState(next);
+      return next;
+    });
+  };
+
   const fetchNext = async (sArg?: InboxState) => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+
     setErr(null);
     setLoading(true);
     setPicked(null);
     setShowExplain(false);
     answeredRef.current = false;
 
-    const s = sArg ?? stateRef.current;
-
     try {
-      const recentHashes = (s.recentHashes ?? []).slice(-20);
-      const recentVerdicts = (s.recentVerdicts ?? []).slice(-12);
+      // ใช้ prefetch ก่อน (เร็ว)
+      if (prefetchedRef.current) {
+        const it = prefetchedRef.current;
+        prefetchedRef.current = null;
+        acceptItem(it);
+        return;
+      }
 
-      const r = await fetch("/api/inbox/next", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recentHashes, recentVerdicts }),
-      });
-
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data?.error || "สร้างข้อความไม่สำเร็จ");
-      setItem(data.item as InboxItem);
+      const s = sArg ?? stateRef.current;
+      const it = await callNextApi(s);
+      acceptItem(it);
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setItem(null);
     } finally {
       setLoading(false);
+      fetchingRef.current = false;
     }
   };
 
-  // ✅ เริ่มใหม่: รีเซ็ตคะแนน แต่เก็บประวัติกันซ้ำ
+  const prefetchNext = async () => {
+    if (prefetchingRef.current) return;
+    if (prefetchedRef.current) return;
+
+    prefetchingRef.current = true;
+    try {
+      const s = stateRef.current;
+      const it = await callNextApi(s);
+      prefetchedRef.current = it;
+    } catch {
+      prefetchedRef.current = null;
+    } finally {
+      prefetchingRef.current = false;
+    }
+  };
+
   const resetLocal = async () => {
     const prev = stateRef.current;
 
@@ -121,9 +184,10 @@ export default function InboxClient() {
       answered: 0,
       correct: 0,
       wrong: 0,
-      recentHashes: (prev.recentHashes ?? []).slice(-30),
-      recentVerdicts: (prev.recentVerdicts ?? []).slice(-30),
-      redFlagsSeen: (prev.redFlagsSeen ?? []).slice(-120),
+      // ✅ เก็บกันซ้ำต่อข้ามเกม
+      recentHashes: (prev.recentHashes ?? []).slice(-300),
+      recentVerdicts: (prev.recentVerdicts ?? []).slice(-120),
+      redFlagsSeen: (prev.redFlagsSeen ?? []).slice(-200),
     };
 
     setState(fresh);
@@ -137,6 +201,7 @@ export default function InboxClient() {
     answeredRef.current = false;
     submittingRef.current = false;
 
+    prefetchedRef.current = null;
     await fetchNext(fresh);
   };
 
@@ -144,7 +209,10 @@ export default function InboxClient() {
     if (didInit.current) return;
     didInit.current = true;
 
-    if (params.get("new") === "1") {
+    const isNew =
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
+
+    if (isNew) {
       resetLocal();
       return;
     }
@@ -159,7 +227,7 @@ export default function InboxClient() {
     answeredRef.current = true;
 
     setShowExplain(true);
-    const isCorrect = picked === item.verdict;
+    const isCorrect = picked === (item as any).verdict;
 
     setState((prev) => {
       const next: InboxState = {
@@ -167,14 +235,17 @@ export default function InboxClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        recentHashes: [...(prev.recentHashes ?? []), item.hash].slice(-60),
-        recentVerdicts: [...(prev.recentVerdicts ?? []), item.verdict].slice(-60),
-        redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(item.redFlags ?? [])].slice(-200),
+        recentHashes: prev.recentHashes ?? [],
+        recentVerdicts: [...(prev.recentVerdicts ?? []), (item as any).verdict].slice(-200),
+        redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(((item as any).redFlags ?? []) as string[])].slice(-400),
       };
       stateRef.current = next;
       saveState(next);
       return next;
     });
+
+    // ✅ เฉลยปุ๊บ prefetch ถัดไป
+    setTimeout(() => prefetchNext(), 0);
   };
 
   const endGame = async () => {
@@ -201,8 +272,6 @@ export default function InboxClient() {
           historyStems: [],
         })
       );
-
-      localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/summary";
     }
   };
@@ -268,7 +337,7 @@ export default function InboxClient() {
 
             <button
               onClick={() => fetchNext()}
-              disabled={!showExplain}
+              disabled={!showExplain || loading}
               className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-40"
             >
               ข้อถัดไป

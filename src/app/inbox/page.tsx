@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export default function Page() {
   return (
-    <Suspense fallback={<div className="p-6 text-white/70">กำลังเปิด Inbox…</div>}>
+    <Suspense fallback={<div className="p-6 text-white/70">กำลังเปิด Inbox Mode…</div>}>
       <InboxClient />
     </Suspense>
   );

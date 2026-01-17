@@ -49,12 +49,33 @@ function normalizeText(s: string) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
+/** ✅ hash แบบ stable (ไม่ขึ้นกับลำดับตัวเลือก) */
 function computeClientHash(q: Quiz) {
-  const base =
-    normalizeText((q as any)?.stem) +
-    "\n" +
-    (q?.options ?? []).map((o) => normalizeText(o.text)).join("\n");
-  return sha256(base);
+  const stem = normalizeText((q as any)?.stem).toLowerCase();
+  const opts = (q?.options ?? [])
+    .map((o) => normalizeText(o.text).toLowerCase())
+    .sort();
+  return sha256(stem + "\n" + opts.join("\n"));
+}
+
+/** ✅ แปลงข้อมูลจาก API ให้ตรงกับ QuizCard type เสมอ (ใช้ whyCorrect) */
+function coerceToUiQuiz(raw: any): Quiz {
+  const stem = String(raw?.stem ?? "");
+  const options = Array.isArray(raw?.options) ? raw.options : [];
+  const signals = Array.isArray(raw?.signals) ? raw.signals.map(String) : [];
+  const whyCorrect = String(
+    raw?.whyCorrect ?? "สรุป: ตรวจโดเมน/ลิงก์ทางการ และอย่าให้ข้อมูลสำคัญ"
+  );
+
+  return {
+    kind: "quiz",
+    stem,
+    options,
+    signals,
+    whyCorrect,
+    hash: typeof raw?.hash === "string" ? raw.hash : undefined,
+    source: raw?.source,
+  };
 }
 
 export default function GameClient() {
@@ -93,32 +114,51 @@ export default function GameClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        freshOnly: true, // ✅ ไม่ใช้ DB เก่า (แต่ server ยังบันทึกลง DB)
-        recentHashes: (s.recentHashes ?? []).slice(-120),
-        recentSignals: (s.historySignals ?? []).slice(-25),
-        recentStems: (s.historyStems ?? []).slice(-40),
+        freshOnly: true,
+        recentHashes: (s.recentHashes ?? []).slice(-300),
+        recentSignals: (s.historySignals ?? []).slice(-60),
+        recentStems: (s.historyStems ?? []).slice(-80),
       }),
     });
 
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data?.error || "สร้างโจทย์ไม่สำเร็จ");
-    return data.quiz as Quiz;
+
+    return coerceToUiQuiz(data.quiz);
+  };
+
+  /** ✅ อัปเดต stateRef แบบ sync กัน race condition */
+  const pushHashSync = (hash: string) => {
+    if (!hash) return;
+
+    const cur = stateRef.current;
+    const next: GameState = {
+      ...cur,
+      recentHashes: [...(cur.recentHashes ?? []), hash].filter(Boolean).slice(-400),
+    };
+    stateRef.current = next;
+    setState(next);
+    saveState(next);
   };
 
   const acceptQuiz = (q: Quiz) => {
-    setQuiz(q);
-
     const h = (q as any)?.hash || computeClientHash(q);
 
-    setState((prev) => {
-      const next: GameState = {
-        ...prev,
-        recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-200),
-      };
-      stateRef.current = next;
-      saveState(next);
-      return next;
-    });
+    // ✅ ถ้าโจทย์ซ้ำใน session: ไม่รับ
+    if ((stateRef.current.recentHashes ?? []).includes(h)) return false;
+
+    const fixed: Quiz = {
+      ...(q as any),
+      kind: "quiz",
+      hash: h,
+      whyCorrect:
+        (q as any)?.whyCorrect ||
+        "สรุป: ตรวจโดเมน/ลิงก์ทางการ และอย่าให้ข้อมูลสำคัญ",
+    };
+
+    setQuiz(fixed);
+    pushHashSync(h);
+    return true;
   };
 
   const fetchNext = async (sArg?: GameState) => {
@@ -132,17 +172,36 @@ export default function GameClient() {
     answeredRef.current = false;
 
     try {
-      // ✅ ถ้ามี prefetch แล้ว ใช้ทันที (เร็วมาก)
+      // ✅ ถ้ามี prefetch แล้ว ใช้ก่อน (เร็วมาก)
       if (prefetchedRef.current) {
         const q = prefetchedRef.current;
         prefetchedRef.current = null;
-        acceptQuiz(q);
-        return;
+
+        const ok = acceptQuiz(q);
+        if (!ok) {
+          // ถ้า prefetched ดันซ้ำ -> ไปยิงใหม่
+          // fall through
+        } else {
+          return;
+        }
       }
 
       const s = sArg ?? stateRef.current;
-      const q = await callNextApi(s);
-      acceptQuiz(q);
+
+      // ✅ กันซ้ำฝั่ง client เพิ่ม: ถ้า API ดันส่งซ้ำ ให้ลองใหม่สั้นๆ
+      let got = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const q = await callNextApi(s);
+        if (acceptQuiz(q)) {
+          got = true;
+          break;
+        }
+      }
+
+      if (!got) {
+        setQuiz(null);
+        setErr("สุ่มได้โจทย์ซ้ำหลายครั้ง ลองกด “ลองใหม่” อีกที");
+      }
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setQuiz(null);
@@ -160,9 +219,12 @@ export default function GameClient() {
     try {
       const s = stateRef.current;
       const q = await callNextApi(s);
-      prefetchedRef.current = q;
+
+      const h = (q as any)?.hash || computeClientHash(q);
+      if ((stateRef.current.recentHashes ?? []).includes(h)) return;
+
+      prefetchedRef.current = { ...(q as any), hash: h };
     } catch {
-      // เงียบไว้ ไม่ต้องทำให้ผู้เล่นเห็น error
       prefetchedRef.current = null;
     } finally {
       prefetchingRef.current = false;
@@ -177,10 +239,10 @@ export default function GameClient() {
       answered: 0,
       correct: 0,
       wrong: 0,
-      // ✅ เก็บกันซ้ำต่อ
+      // ✅ เก็บกันซ้ำข้ามเกม (ตามที่คุณต้องการ)
       historySignals: (prev.historySignals ?? []).slice(-120),
-      historyStems: (prev.historyStems ?? []).slice(-100),
-      recentHashes: (prev.recentHashes ?? []).slice(-200),
+      historyStems: (prev.historyStems ?? []).slice(-120),
+      recentHashes: (prev.recentHashes ?? []).slice(-400),
     };
 
     setState(fresh);
@@ -202,9 +264,9 @@ export default function GameClient() {
     if (didInit.current) return;
     didInit.current = true;
 
-    // ✅ ไม่ใช้ useSearchParams (กัน build error)
     const isNew =
-      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("new") === "1";
 
     if (isNew) {
       resetLocal();
@@ -235,8 +297,8 @@ export default function GameClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-150),
-        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-120),
+        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-300),
+        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-250),
         recentHashes: prev.recentHashes ?? [],
       };
       stateRef.current = next;
@@ -244,7 +306,7 @@ export default function GameClient() {
       return next;
     });
 
-    // ✅ เฉลยปุ๊บ เริ่ม prefetch ข้อถัดไปทันที
+    // ✅ เฉลยปุ๊บ prefetch ทันที
     setTimeout(() => prefetchNext(), 0);
   };
 
