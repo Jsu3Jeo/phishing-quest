@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { QuizCard, type Quiz } from "@/components/QuizCard";
+import { sha256 } from "@/lib/utils";
 
 type GameState = {
   score: number;
@@ -12,9 +12,10 @@ type GameState = {
   wrong: number;
   historySignals: string[];
   historyStems: string[];
+  recentHashes: string[];
 };
 
-const STORAGE_KEY = "pq_game_v1";
+const STORAGE_KEY = "pq_game_v2";
 
 function safeState(v: any): GameState {
   return {
@@ -24,6 +25,7 @@ function safeState(v: any): GameState {
     wrong: typeof v?.wrong === "number" ? v.wrong : 0,
     historySignals: Array.isArray(v?.historySignals) ? v.historySignals.map(String) : [],
     historyStems: Array.isArray(v?.historyStems) ? v.historyStems.map(String) : [],
+    recentHashes: Array.isArray(v?.recentHashes) ? v.recentHashes.map(String).filter(Boolean) : [],
   };
 }
 
@@ -43,9 +45,20 @@ function saveState(s: GameState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
 }
 
-export default function GameClient() {
-  const params = useSearchParams();
+function normalizeText(s: string) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
 
+/** ✅ กันพัง: ถ้า API ไม่ส่ง hash มา จะทำ hash ฝั่ง client ชั่วคราว */
+function computeClientHash(q: Quiz) {
+  const base =
+    normalizeText((q as any)?.stem) +
+    "\n" +
+    (q?.options ?? []).map((o) => normalizeText(o.text)).join("\n");
+  return sha256(base);
+}
+
+export default function GameClient() {
   const [quiz, setQuiz] = useState<Quiz | null>(null);
   const [selected, setSelected] = useState<"A" | "B" | "C" | "D" | null>(null);
   const [showExplain, setShowExplain] = useState(false);
@@ -66,12 +79,16 @@ export default function GameClient() {
   const didInit = useRef(false);
   const answeredRef = useRef(false);
   const submittingRef = useRef(false);
+  const fetchingRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
   const fetchNext = async (sArg?: GameState) => {
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
+
     setErr(null);
     setLoading(true);
     setSelected(null);
@@ -85,23 +102,40 @@ export default function GameClient() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          recentSignals: (s.historySignals ?? []).slice(-12),
-          recentStems: (s.historyStems ?? []).slice(-10),
+          recentHashes: (s.recentHashes ?? []).slice(-60),
+          recentSignals: (s.historySignals ?? []).slice(-20),
+          recentStems: (s.historyStems ?? []).slice(-30),
         }),
       });
 
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data?.error || "สร้างโจทย์ไม่สำเร็จ");
-      setQuiz(data.quiz as Quiz);
+
+      const q = data.quiz as Quiz;
+      setQuiz(q);
+
+      // ✅ hash กันซ้ำ: ใช้ของ server ก่อน ถ้าไม่มี -> ทำเอง
+      const h = (q as any)?.hash || computeClientHash(q);
+
+      // ✅ ทันทีที่ “รับโจทย์” ให้บันทึก hash กันซ้ำ
+      setState((prev) => {
+        const next: GameState = {
+          ...prev,
+          recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-120),
+        };
+        stateRef.current = next;
+        saveState(next);
+        return next;
+      });
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setQuiz(null);
     } finally {
       setLoading(false);
+      fetchingRef.current = false;
     }
   };
 
-  // ✅ เริ่มเกมใหม่: รีเซ็ตคะแนน แต่เก็บ history กันซ้ำ
   const resetLocal = async () => {
     const prev = stateRef.current;
 
@@ -110,8 +144,10 @@ export default function GameClient() {
       answered: 0,
       correct: 0,
       wrong: 0,
-      historySignals: (prev.historySignals ?? []).slice(-30),
-      historyStems: (prev.historyStems ?? []).slice(-20),
+      // ✅ เก็บประวัติไว้กันซ้ำ (ตามที่คุณตั้งใจ)
+      historySignals: (prev.historySignals ?? []).slice(-80),
+      historyStems: (prev.historyStems ?? []).slice(-60),
+      recentHashes: (prev.recentHashes ?? []).slice(-120),
     };
 
     setState(fresh);
@@ -132,7 +168,9 @@ export default function GameClient() {
     if (didInit.current) return;
     didInit.current = true;
 
-    if (params.get("new") === "1") {
+    // ✅ ตัด useSearchParams ออกให้ build ผ่านชัวร์
+    const isNew = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
+    if (isNew) {
       resetLocal();
       return;
     }
@@ -161,8 +199,9 @@ export default function GameClient() {
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-60),
-        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-40),
+        historySignals: [...(prev.historySignals ?? []), ...(quiz.signals ?? [])].slice(-120),
+        historyStems: [...(prev.historyStems ?? []), quiz.stem].slice(-90),
+        recentHashes: prev.recentHashes ?? [],
       };
       stateRef.current = next;
       saveState(next);
@@ -184,8 +223,8 @@ export default function GameClient() {
 
     if (typeof window !== "undefined") {
       localStorage.setItem("pq_last_summary_v1", JSON.stringify(s));
-      // ✅ จบเกมแล้ว “ล้างคะแนน” แต่เก็บ history ไม่จำเป็นแล้ว
-      localStorage.removeItem(STORAGE_KEY);
+      // ✅ ไม่ลบ STORAGE_KEY ถ้าคุณอยากกันซ้ำข้ามเกมด้วย
+      // localStorage.removeItem(STORAGE_KEY);
       window.location.href = "/summary";
     }
   };
@@ -204,10 +243,16 @@ export default function GameClient() {
           </div>
 
           <div className="flex gap-2">
-            <button onClick={endGame} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
+            <button
+              onClick={endGame}
+              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
+            >
               จบเกม
             </button>
-            <button onClick={resetLocal} className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
+            <button
+              onClick={resetLocal}
+              className="rounded-xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
+            >
               เริ่มเกมใหม่
             </button>
           </div>
@@ -220,7 +265,10 @@ export default function GameClient() {
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
           {err}
           <div className="mt-2">
-            <button className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10" onClick={() => fetchNext()}>
+            <button
+              className="rounded-xl border border-white/15 px-3 py-2 hover:bg-white/10"
+              onClick={() => fetchNext()}
+            >
               ลองใหม่
             </button>
           </div>
@@ -250,13 +298,16 @@ export default function GameClient() {
 
             <button
               onClick={() => fetchNext()}
-              disabled={!showExplain}
+              disabled={!showExplain || loading}
               className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-40"
             >
               ข้อต่อไป
             </button>
 
-            <button onClick={endGame} className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10">
+            <button
+              onClick={endGame}
+              className="rounded-xl border border-white/20 px-4 py-2 hover:bg-white/10"
+            >
               ไปหน้าสรุป
             </button>
           </div>

@@ -9,7 +9,7 @@ import { sha256, safeJsonParse } from "@/lib/utils";
 const GenOptionSchema = z.object({
   id: z.string().min(1),
   text: z.string().min(2),
-  explanation: z.string().min(6), // ✅ ผ่อนนิดนึง กัน fail ง่าย
+  explanation: z.string().min(6), // ผ่อนนิดนึง กัน fail ง่าย
 });
 
 const GenQuizSchema = z.object({
@@ -56,14 +56,12 @@ function extractLikelyJson(text: string) {
 }
 
 function parseGenQuiz(text: string) {
-  // 1) ตรง ๆ
   const p1 = safeJsonParse<unknown>(text);
   if (p1.ok) {
     const z1 = GenQuizSchema.safeParse(p1.data);
     if (z1.success) return z1.data;
   }
 
-  // 2) salvage JSON ช่วง {...}
   const cut = extractLikelyJson(text);
   if (cut) {
     const p2 = safeJsonParse<unknown>(cut);
@@ -77,11 +75,9 @@ function parseGenQuiz(text: string) {
 }
 
 function buildQuizOut(gen: GenQuiz): QuizOut | null {
-  // กัน option ซ้ำ
   const optionTexts = gen.options.map((o) => normalizeText(o.text).toLowerCase());
   if (new Set(optionTexts).size < 4) return null;
 
-  // correctId ต้องอยู่จริง
   if (!gen.options.some((o) => o.id === gen.correctId)) return null;
 
   const shuffled = shuffle(gen.options);
@@ -107,29 +103,45 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   return { ...quizNoHash, hash };
 }
 
-async function getCachedQuiz(recentStems: string[]) {
+// ✅ cache: กันซ้ำด้วย hash เป็นหลัก (เด็ดขาด)
+async function getCachedQuiz(recentHashes: string[], recentStems: string[]) {
   try {
-    const rows = await prisma.question.findMany({ take: 80 });
-    const candidates: any[] = [];
+    // ดึงเยอะขึ้น และเรียงใหม่ก่อน เพื่อไม่วนแต่ของเก่า
+    const rows = await prisma.question.findMany({
+      take: 600,
+      orderBy: { createdAt: "desc" },
+      select: { contentJson: true },
+    });
 
+    const candidates: any[] = [];
     for (const r of rows) {
       try {
         const obj = JSON.parse(r.contentJson || "{}");
         if (obj?.kind !== "quiz") continue;
-        if (!obj?.stem || !obj?.options) continue;
+        if (!obj?.hash || !obj?.stem || !obj?.options) continue;
         candidates.push(obj);
       } catch {}
     }
 
+    // ✅ ห้ามซ้ำ hash ใน session เด็ดขาด
     const filtered = candidates.filter((q) => {
+      const h = String(q.hash || "");
+      if (!h) return false;
+      if (recentHashes.includes(h)) return false;
+
+      // กันซ้ำ stem แบบเสริม (เผื่อ hash ไม่ส่งมาบางเคส)
       const stem = String(q.stem || "");
-      return !recentStems.includes(stem);
+      if (stem && recentStems.includes(stem)) return false;
+
+      return true;
     });
 
-    const pool = filtered.length > 0 ? filtered : candidates; // ถ้าไม่มีจริง ๆ ก็ยอมซ้ำเพื่อให้เกมไม่ค้าง
+    const pool = filtered.length > 0 ? filtered : [];
     if (pool.length === 0) return null;
 
-    return pool[Math.floor(Math.random() * pool.length)];
+    // ✅ สุ่มจาก top ช่วงล่าสุด เพื่อกระจาย
+    const top = pool.slice(0, Math.min(pool.length, 250));
+    return top[Math.floor(Math.random() * top.length)];
   } catch {
     return null;
   }
@@ -138,22 +150,28 @@ async function getCachedQuiz(recentStems: string[]) {
 async function generateQuiz(avoidSignals: string[], avoidStems: string[]) {
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-const prompt = `
+  const prompt = `
 NONCE=${nonce}
 คุณคือครูสอน cybersecurity ออกโจทย์ฝึกจับ phishing แบบ "สถานการณ์" 1 ข้อ
 
-เงื่อนไขกันซ้ำ (สำคัญมาก):
-- ห้ามใช้ประโยค/รูปแบบ/เทมเพลตเดิมซ้ำ
-- หัวข้อให้สุ่มจากหลายธีม: ธนาคาร, ขนส่งพัสดุ, social, work email, OTP, marketplace, streaming, travel, gov, telecom
-- หลีกเลี่ยง stem ที่คล้ายของเดิม: 
+เงื่อนไขสำคัญ:
+- ห้ามใช้เทมเพลตเดิมซ้ำ (อย่าเขียนรูปแบบเดิมวน)
+- สุ่มธีมให้หลากหลาย: ธนาคาร, ขนส่งพัสดุ, social, work email, OTP, marketplace, streaming, travel, gov, telecom แบบสุ่มๆ
+- 4 ตัวเลือกต้องต่างกันมาก (ห้ามคำตอบคล้ายกัน)
+- explanation สั้นแต่ชัดรายข้อ
+- correctId ต้องอ้างถึง option.id (o1/o2/o3/o4)
+- signals อย่างน้อย 2
+
+หลีกเลี่ยง stem ที่คล้ายของเดิม:
 ${avoidStems.map((s) => `- ${s}`).join("\n")}
 
-ต้องได้ 4 ตัวเลือกที่ต่างกันมาก (ห้ามคำตอบคล้ายกัน)
-ตอบเป็น JSON เท่านั้น ห้าม markdown
+หลีกเลี่ยง signals ซ้ำเยอะ:
+${avoidSignals.map((s) => `- ${s}`).join("\n")}
 
-รูปแบบ JSON:
+ตอบเป็น JSON เท่านั้น ห้าม markdown/ข้อความอื่น
+
 {
   "stem": "คำถาม...",
   "options": [
@@ -168,9 +186,8 @@ ${avoidStems.map((s) => `- ${s}`).join("\n")}
 }
 `.trim();
 
-  // ✅ timeout กันค้าง
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 12_000);
+  const t = setTimeout(() => controller.abort(), 20_000); // ✅ เพิ่มเวลาให้ Vercel/Neon ไม่ fail ง่าย
 
   try {
     const resp = await openai.chat.completions.create(
@@ -180,7 +197,7 @@ ${avoidStems.map((s) => `- ${s}`).join("\n")}
           { role: "system", content: "You output ONLY valid JSON. No markdown." },
           { role: "user", content: prompt },
         ],
-        temperature: 0.65, // ✅ ลดเพื่อให้ JSON ตรงขึ้น
+        temperature: 0.7,
       },
       { signal: controller.signal } as any
     );
@@ -189,8 +206,7 @@ ${avoidStems.map((s) => `- ${s}`).join("\n")}
     const gen = parseGenQuiz(text);
     if (!gen) return null;
 
-    const out = buildQuizOut(gen);
-    return out;
+    return buildQuizOut(gen);
   } catch {
     return null;
   } finally {
@@ -204,17 +220,30 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json().catch(() => null);
 
-  const recentSignals: string[] = Array.isArray(body?.recentSignals) ? body.recentSignals.slice(0, 30).map(String) : [];
-  const recentStems: string[] = Array.isArray(body?.recentStems) ? body.recentStems.slice(0, 15).map(String) : [];
+  // ✅ รับ recentHashes จาก client เพื่อกันซ้ำแบบเด็ดขาด
+  const recentHashes: string[] = Array.isArray(body?.recentHashes)
+    ? body.recentHashes.slice(0, 80).map(String).filter(Boolean)
+    : [];
 
-  // ✅ FAST PATH: DB cache ก่อน
-  const cached = await getCachedQuiz(recentStems);
+  const recentSignals: string[] = Array.isArray(body?.recentSignals)
+    ? body.recentSignals.slice(0, 40).map(String).filter(Boolean)
+    : [];
+
+  const recentStems: string[] = Array.isArray(body?.recentStems)
+    ? body.recentStems.slice(0, 30).map(String).filter(Boolean)
+    : [];
+
+  // ✅ FAST PATH: DB cache ก่อน (ห้ามซ้ำ hash)
+  const cached = await getCachedQuiz(recentHashes, recentStems);
   if (cached) return NextResponse.json({ quiz: cached });
 
-  // ✅ ถ้าไม่มี cache เลย ค่อยยิง AI
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const q = await generateQuiz(recentSignals.slice(-12), recentStems.slice(-8));
+  // ✅ ถ้าไม่มี cache เลย ค่อยยิง AI แล้วบันทึกลง DB
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const q = await generateQuiz(recentSignals.slice(-20), recentStems.slice(-20));
     if (!q) continue;
+
+    // ห้ามซ้ำกับ session ของผู้เล่น
+    if (recentHashes.includes(q.hash)) continue;
 
     const exists = await prisma.question.findUnique({ where: { hash: q.hash } });
     if (exists) continue;
@@ -229,5 +258,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ quiz: { kind: "quiz", ...q } });
   }
 
+  // ✅ ไม่ยอมซ้ำ: ถ้าหาไม่ได้จริง ๆ ให้ error ไปเลย (ตามที่คุณต้องการ “ไม่ซ้ำเลย”)
   return NextResponse.json({ error: "AI สร้างโจทย์ไม่สำเร็จ ลองใหม่อีกครั้ง" }, { status: 503 });
 }

@@ -9,13 +9,18 @@ declare global {
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  throw new Error("DATABASE_URL is missing. Check .env / Vercel env vars.");
+  throw new Error("DATABASE_URL is not set");
 }
 
-const pool = new Pool({ connectionString });
+// ใช้ pooler ของ Neon ได้
+const pool = new Pool({
+  connectionString,
+  // กัน dev ปิดๆเปิดๆ
+  max: 5,
+});
 
 export const prisma =
-  global.prisma ??
+  global.prisma ||
   new PrismaClient({
     adapter: new PrismaPg(pool),
   });
