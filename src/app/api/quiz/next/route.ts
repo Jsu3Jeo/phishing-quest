@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { z } from "zod";
-import { prisma } from "@/lib/db";
 import { getSessionFromRequest } from "@/lib/auth";
 import { openai } from "@/lib/openai";
 import { sha256, safeJsonParse } from "@/lib/utils";
@@ -32,7 +31,7 @@ export type QuizOut = {
   whyCorrect: string;
   signals: string[];
   hash: string;
-  source?: "ai" | "fallback" | "db";
+  source?: "ai";
 };
 
 function shuffle<T>(arr: T[]) {
@@ -48,12 +47,38 @@ function normalizeText(s: string) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
-/** ✅ สำคัญ: hash ต้อง “ไม่ขึ้นกับลำดับตัวเลือก” กันโจทย์เดิมได้จริง */
+/** ✅ hash stable: ไม่ขึ้นกับลำดับตัวเลือก */
 function hashQuiz(stem: string, optionTexts: string[]) {
   const stemN = normalizeText(stem).toLowerCase();
-  const optsN = optionTexts.map((t) => normalizeText(t).toLowerCase()).sort(); // ✅ sort!
-  const base = stemN + "\n" + optsN.join("\n");
-  return sha256(base);
+  const optsN = optionTexts.map((t) => normalizeText(t).toLowerCase()).sort();
+  return sha256(stemN + "\n" + optsN.join("\n"));
+}
+
+/** ✅ similarity แบบ 3-gram (ใช้ได้กับภาษาไทย) */
+function grams3(s: string) {
+  const x = normalizeText(s)
+    .toLowerCase()
+    // ลบ URL ง่ายๆ เพื่อลด “คล้ายเพราะลิงก์”
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const set = new Set<string>();
+  if (x.length < 3) {
+    if (x) set.add(x);
+    return set;
+  }
+  for (let i = 0; i <= x.length - 3; i++) set.add(x.slice(i, i + 3));
+  return set;
+}
+
+function jaccard(a: Set<string>, b: Set<string>) {
+  if (!a.size && !b.size) return 1;
+  let inter = 0;
+  for (const v of a) if (b.has(v)) inter++;
+  const uni = a.size + b.size - inter;
+  return uni === 0 ? 0 : inter / uni;
 }
 
 function extractLikelyJson(text: string) {
@@ -109,108 +134,27 @@ function buildQuizOut(gen: GenQuiz): QuizOut | null {
   };
 }
 
-/** ✅ fallback: ไม่ค้าง ไม่ 503 */
-function fallbackQuiz(recentHashes: string[]): QuizOut {
-  const bank = [
-    {
-      stem: "คุณได้รับ SMS แจ้งว่า “พัสดุติดศุลกากร ให้ชำระ 9 บาทภายใน 30 นาที” พร้อมลิงก์ย่อ คุณควรทำอย่างไรดีที่สุด?",
-      correct: "เปิดเว็บ/แอปขนส่งทางการเอง ตรวจเลขพัสดุ และอย่ากดลิงก์จาก SMS",
-      wrong: ["กดลิงก์แล้วจ่ายทันทีเพราะจำนวนเงินน้อย", "ส่งต่อ SMS ให้เพื่อนช่วยเช็คให้", "ตอบกลับข้อความเพื่อขอรายละเอียดเพิ่มเติม"],
-      signals: ["ลิงก์ย่อ/ไม่ใช่โดเมนทางการ", "เร่งด่วนให้ทำภายในเวลา", "เรียกชำระเงินเล็กน้อยเพื่อหลอกให้ชิน"],
-      why: "วิธีที่ปลอดภัยคือเข้าแอป/เว็บทางการด้วยตัวเอง ไม่คลิกลิงก์ในข้อความเร่งด่วน",
-    },
-    {
-      stem: "มีอีเมลจาก “IT Support” ขอให้คุณล็อกอินเพื่ออัปเดตรหัสผ่าน โดยให้กดปุ่ม Login ในอีเมล คุณควรตรวจอะไรเป็นอันดับแรก?",
-      correct: "ตรวจโดเมนผู้ส่ง/ลิงก์จริง (hover) ว่าเป็นโดเมนองค์กรจริงหรือไม่",
-      wrong: ["ดูแค่ว่ามีโลโก้บริษัทหรือไม่", "ดูว่าเขียนภาษาไทยถูกต้องหรือเปล่า", "รีบทำตามเพราะกลัวโดนล็อกบัญชี"],
-      signals: ["ขอให้ล็อกอินผ่านลิงก์ในอีเมล", "ขู่ให้รีบทำ", "ปลอมเป็นฝ่าย IT"],
-      why: "การตรวจโดเมน/ลิงก์จริงช่วยจับการปลอมหน้าเว็บได้ดีที่สุดก่อนทำอะไรต่อ",
-    },
-    {
-      stem: "คุณได้รับข้อความในโซเชียลว่า “คุณถูกรางวัล” พร้อมไฟล์แนบ .zip และบอกให้เปิดเพื่อรับสิทธิ์ คุณควรทำอย่างไร?",
-      correct: "ไม่เปิดไฟล์แนบ และรายงาน/บล็อกบัญชีผู้ส่ง",
-      wrong: ["เปิดไฟล์ก่อน แล้วค่อยสแกนไวรัสทีหลัง", "ส่งไฟล์ไปให้อีกคนลองเปิดแทน", "แตกไฟล์เฉพาะในมือถือจะปลอดภัยกว่า"],
-      signals: ["ไฟล์แนบ .zip จากแหล่งไม่รู้จัก", "ล่อด้วยของฟรี/รางวัล", "ชวนให้เปิดไฟล์ทันที"],
-      why: "ไฟล์แนบจากแหล่งไม่รู้จักเสี่ยงมัลแวร์สูง ทางที่ถูกคือไม่เปิดและรายงาน",
-    },
-  ];
-
-  for (let i = 0; i < 12; i++) {
-    const pick = bank[Math.floor(Math.random() * bank.length)];
-    const correctIndex = Math.floor(Math.random() * 4);
-
-    const choices = new Array(4).fill("");
-    choices[correctIndex] = pick.correct;
-
-    const wrongs = shuffle(pick.wrong);
-    let wi = 0;
-    for (let k = 0; k < 4; k++) {
-      if (choices[k]) continue;
-      choices[k] = wrongs[wi++] ?? "อย่ากดลิงก์/อย่าให้ข้อมูลส่วนตัว";
-    }
-
-    const hash = hashQuiz(pick.stem, choices);
-    if (recentHashes.includes(hash)) continue;
-
-    const labels = ["A", "B", "C", "D"] as const;
-    return {
-      kind: "quiz",
-      stem: pick.stem,
-      options: choices.map((text, idx) => ({
-        label: labels[idx],
-        text,
-        isCorrect: idx === correctIndex,
-        explanation:
-          idx === correctIndex
-            ? "เป็นการป้องกันที่ถูกต้องและลดความเสี่ยงโดนหลอก/โดนฝังมัลแวร์"
-            : "เสี่ยงโดนหลอกหรือโดนขโมยข้อมูล ควรเลือกแนวทางที่ตรวจสอบผ่านช่องทางทางการ",
-      })),
-      whyCorrect: pick.why,
-      signals: pick.signals,
-      hash,
-      source: "fallback",
-    };
-  }
-
-  const pick = bank[0];
-  const hash = hashQuiz(pick.stem, [pick.correct, ...pick.wrong]);
-  return {
-    kind: "quiz",
-    stem: pick.stem,
-    options: [
-      { label: "A", text: pick.correct, isCorrect: true, explanation: "ถูกต้องและปลอดภัยที่สุด" },
-      { label: "B", text: pick.wrong[0], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "C", text: pick.wrong[1], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-      { label: "D", text: pick.wrong[2], isCorrect: false, explanation: "เสี่ยงและไม่ควรทำ" },
-    ],
-    whyCorrect: pick.why,
-    signals: pick.signals,
-    hash,
-    source: "fallback",
-  };
-}
-
 async function generateQuizAI(avoidSignals: string[], avoidStems: string[]) {
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   const nonce = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const prompt = `
 NONCE=${nonce}
-ออกโจทย์ฝึกจับ phishing แบบ "สถานการณ์" 1 ข้อ (ภาษาไทยเป็นหลัก แทรกอังกฤษได้เล็กน้อย)
+สร้างโจทย์ฝึกจับ phishing แบบ "สถานการณ์" 1 ข้อ (ไทยเป็นหลัก แทรกอังกฤษได้เล็กน้อย)
 
-เงื่อนไข:
-- ห้ามใช้เทมเพลตเดิมซ้ำ
+สำคัญมาก:
+- ต้อง "ใหม่" และ "ไม่คล้าย" รายการด้านล่าง (ห้ามใช้โครงเรื่อง/คำพูด/ธีมใกล้เคียง)
+- ต้องมีรายละเอียดเฉพาะเจาะจง (แบรนด์/ช่องทาง/บริบท/เวลา/คำขู่/ข้อเสนอ) ที่ต่างจากเดิม
 - สุ่มธีม: ธนาคาร/ขนส่ง/OTP/marketplace/streaming/work email/social/travel/telecom/gov
-- ตัวเลือก 4 ข้อ “ต่างกันชัดเจน”
+- ตัวเลือก 4 ข้อ “ต่างกันชัดเจน” และมีคำอธิบายสั้นๆรายข้อ
 - correctId ต้องอ้างถึง option.id (o1/o2/o3/o4)
-- explanation สั้นๆแต่ชัดเจนรายข้อ
 - signals อย่างน้อย 2
 
-หลีกเลี่ยง stem คล้ายเดิม:
-${avoidStems.map((s) => `- ${s}`).join("\n")}
+หลีกเลี่ยง stem ใกล้เคียง:
+${avoidStems.slice(-40).map((s) => `- ${s}`).join("\n")}
 
-หลีกเลี่ยง signals ซ้ำเยอะ:
-${avoidSignals.map((s) => `- ${s}`).join("\n")}
+หลีกเลี่ยง signals ซ้ำ:
+${avoidSignals.slice(-30).map((s) => `- ${s}`).join("\n")}
 
 ตอบเป็น JSON อย่างเดียว:
 {
@@ -227,9 +171,8 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
 }
 `.trim();
 
-  // ✅ เร็ว: timeout สั้น ถ้าพลาด -> fallback ทันที
   const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 6500);
+  const t = setTimeout(() => controller.abort(), 5500); // เร็ว + ไม่ค้าง
 
   try {
     const resp = await openai.chat.completions.create(
@@ -240,7 +183,7 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
           { role: "user", content: prompt },
         ],
         response_format: { type: "json_object" } as any,
-        temperature: 0.65,
+        temperature: 0.8, // เพิ่มความหลากหลาย
         max_tokens: 650,
       },
       { signal: controller.signal } as any
@@ -249,7 +192,6 @@ ${avoidSignals.map((s) => `- ${s}`).join("\n")}
     const text = resp.choices[0]?.message?.content?.trim() || "";
     const gen = parseGenQuiz(text);
     if (!gen) return null;
-
     return buildQuizOut(gen);
   } catch {
     return null;
@@ -265,38 +207,47 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
 
   const recentHashes: string[] = Array.isArray(body?.recentHashes)
-    ? body.recentHashes.slice(0, 300).map(String).filter(Boolean)
+    ? body.recentHashes.slice(0, 500).map(String).filter(Boolean)
     : [];
 
   const recentSignals: string[] = Array.isArray(body?.recentSignals)
-    ? body.recentSignals.slice(0, 150).map(String).filter(Boolean)
+    ? body.recentSignals.slice(0, 300).map(String).filter(Boolean)
     : [];
 
   const recentStems: string[] = Array.isArray(body?.recentStems)
-    ? body.recentStems.slice(0, 150).map(String).filter(Boolean)
+    ? body.recentStems.slice(0, 300).map(String).filter(Boolean)
     : [];
 
-  // ✅ คุณต้องการ “ไม่เอา DB เก่า” -> ใช้ freshOnly จาก client
-  const freshOnly = body?.freshOnly === true;
+  const recentStemGrams = recentStems.map((s) => grams3(s));
+  const start = Date.now();
+  const HARD_LIMIT_MS = 12_000;
 
-  // ✅ กันซ้ำใน session “เด็ดขาด” แม้ AI สร้างซ้ำ/DB ซ้ำ
-  // พยายาม AI แค่ 2 ครั้ง เร็วๆ
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const q = await generateQuizAI(recentSignals.slice(-30), recentStems.slice(-40));
+  // ✅ fresh-only: ไม่อ่าน DB / ไม่ใช้ fallback bank
+  // ✅ พยายามหลายรอบภายในเวลาจำกัด
+  for (let attempt = 0; attempt < 10; attempt++) {
+    if (Date.now() - start > HARD_LIMIT_MS) break;
+
+    const q = await generateQuizAI(recentSignals, recentStems);
     if (!q) continue;
 
     if (recentHashes.includes(q.hash)) continue;
 
-    // บันทึกลง DB แบบ best-effort (ไม่รอให้ช้า)
-    prisma.question
-      .create({
-        data: { hash: q.hash, contentJson: JSON.stringify({ ...q, kind: "quiz" }) },
-      })
-      .catch(() => {});
+    // ✅ กัน “คล้าย” ด้วย 3-gram similarity
+    const gNew = grams3(q.stem);
+    let tooSimilar = false;
+    for (const gOld of recentStemGrams) {
+      if (jaccard(gNew, gOld) >= 0.62) {
+        tooSimilar = true;
+        break;
+      }
+    }
+    if (tooSimilar) continue;
 
     return NextResponse.json({ quiz: q });
   }
 
-  // ✅ ไม่มีแล้ว “AI สร้างโจทย์ไม่สำเร็จ” แบบค้าง — ส่ง fallback ทันที
-  return NextResponse.json({ quiz: fallbackQuiz(recentHashes) });
+  return NextResponse.json(
+    { error: "AI สร้างโจทย์ใหม่ไม่สำเร็จ (กันซ้ำ/กันคล้ายเข้ม) กดลองใหม่อีกครั้ง" },
+    { status: 503 }
+  );
 }

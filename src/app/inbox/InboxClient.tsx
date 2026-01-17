@@ -15,6 +15,7 @@ type InboxState = {
   recentHashes: string[];
   recentVerdicts: Verdict[];
   redFlagsSeen: string[];
+  recentTexts: string[]; // ✅ เพิ่ม: เก็บ subject+body กัน “คล้าย”
 };
 
 const STORAGE_KEY = "pq_inbox_v3";
@@ -27,6 +28,7 @@ const DEFAULT_STATE: InboxState = {
   recentHashes: [],
   recentVerdicts: [],
   redFlagsSeen: [],
+  recentTexts: [], // ✅ เพิ่ม
 };
 
 function coerceState(input: any): InboxState {
@@ -37,9 +39,12 @@ function coerceState(input: any): InboxState {
     wrong: typeof input?.wrong === "number" ? input.wrong : 0,
     recentHashes: Array.isArray(input?.recentHashes) ? input.recentHashes.map(String).filter(Boolean) : [],
     recentVerdicts: Array.isArray(input?.recentVerdicts)
-      ? input.recentVerdicts.map((v: any) => (v === "legit" ? "legit" : v === "phishing" ? "phishing" : null)).filter(Boolean)
+      ? input.recentVerdicts
+          .map((v: any) => (v === "legit" ? "legit" : v === "phishing" ? "phishing" : null))
+          .filter(Boolean)
       : [],
     redFlagsSeen: Array.isArray(input?.redFlagsSeen) ? input.redFlagsSeen.map(String).filter(Boolean) : [],
+    recentTexts: Array.isArray(input?.recentTexts) ? input.recentTexts.map(String).filter(Boolean) : [], // ✅ เพิ่ม
   };
 }
 
@@ -66,8 +71,12 @@ function normalizeText(s: string) {
 // กันพัง: ถ้า item ไม่มี hash (เผื่อ)
 function computeClientHash(item: InboxItem) {
   const base =
-    `${normalizeText((item as any)?.channel)}\n${normalizeText((item as any)?.from)}\n${normalizeText((item as any)?.subject)}\n${normalizeText((item as any)?.body)}\n` +
-    (((item as any)?.links ?? []) as any[]).map((l) => `${normalizeText(l.text)}|${normalizeText(l.url)}`).join("\n");
+    `${normalizeText((item as any)?.channel)}\n${normalizeText((item as any)?.from)}\n${normalizeText(
+      (item as any)?.subject
+    )}\n${normalizeText((item as any)?.body)}\n` +
+    (((item as any)?.links ?? []) as any[])
+      .map((l) => `${normalizeText(l.text)}|${normalizeText(l.url)}`)
+      .join("\n");
   return sha256(base);
 }
 
@@ -102,8 +111,9 @@ export default function InboxClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        recentHashes: (s.recentHashes ?? []).slice(-200),
-        recentVerdicts: (s.recentVerdicts ?? []).slice(-80),
+        recentHashes: (s.recentHashes ?? []).slice(-600),
+        recentVerdicts: (s.recentVerdicts ?? []).slice(-200),
+        recentTexts: (s.recentTexts ?? []).slice(-200), // ✅ ส่งให้ API กันคล้าย
       }),
     });
 
@@ -112,21 +122,31 @@ export default function InboxClient() {
     return data.item as InboxItem;
   };
 
+  /** ✅ sync update กัน race */
+  const pushHashAndTextSync = (hash: string, packedText: string) => {
+    const cur = stateRef.current;
+
+    const next: InboxState = {
+      ...cur,
+      recentHashes: [...(cur.recentHashes ?? []), hash].filter(Boolean).slice(-600),
+      recentTexts: [...(cur.recentTexts ?? []), packedText].filter(Boolean).slice(-200),
+    };
+
+    stateRef.current = next;
+    setState(next);
+    saveState(next);
+  };
+
   const acceptItem = (it: InboxItem) => {
-    setItem(it);
-
     const h = (it as any)?.hash || computeClientHash(it);
+    const packed = `${(it as any)?.subject ?? ""}\n${(it as any)?.body ?? ""}`.trim();
 
-    // ✅ สำคัญสุด: บันทึก hash ทันทีที่ “รับโจทย์” กันซ้ำข้อถัดไป
-    setState((prev) => {
-      const next: InboxState = {
-        ...prev,
-        recentHashes: [...(prev.recentHashes ?? []), h].filter(Boolean).slice(-300),
-      };
-      stateRef.current = next;
-      saveState(next);
-      return next;
-    });
+    // ✅ กันซ้ำแบบเด็ดขาด: ถ้า hash ซ้ำใน session -> ไม่รับ
+    if ((stateRef.current.recentHashes ?? []).includes(h)) return false;
+
+    setItem({ ...(it as any), hash: h });
+    pushHashAndTextSync(h, packed);
+    return true;
   };
 
   const fetchNext = async (sArg?: InboxState) => {
@@ -140,17 +160,32 @@ export default function InboxClient() {
     answeredRef.current = false;
 
     try {
-      // ใช้ prefetch ก่อน (เร็ว)
+      // ✅ ใช้ prefetch ก่อน (เร็ว)
       if (prefetchedRef.current) {
         const it = prefetchedRef.current;
         prefetchedRef.current = null;
-        acceptItem(it);
-        return;
+
+        const ok = acceptItem(it);
+        if (ok) return;
+        // ถ้าดันซ้ำ -> ไปยิงใหม่ต่อ
       }
 
       const s = sArg ?? stateRef.current;
-      const it = await callNextApi(s);
-      acceptItem(it);
+
+      // ✅ ถ้า API ส่งซ้ำ (หรือซ้ำเพราะ user spam) ลองใหม่สั้นๆ
+      let got = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const it = await callNextApi(s);
+        if (acceptItem(it)) {
+          got = true;
+          break;
+        }
+      }
+
+      if (!got) {
+        setItem(null);
+        setErr("สุ่มได้ข้อความซ้ำหลายครั้ง ลองกด “ลองใหม่” อีกที");
+      }
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setItem(null);
@@ -168,7 +203,11 @@ export default function InboxClient() {
     try {
       const s = stateRef.current;
       const it = await callNextApi(s);
-      prefetchedRef.current = it;
+
+      const h = (it as any)?.hash || computeClientHash(it);
+      if ((stateRef.current.recentHashes ?? []).includes(h)) return;
+
+      prefetchedRef.current = { ...(it as any), hash: h };
     } catch {
       prefetchedRef.current = null;
     } finally {
@@ -185,9 +224,10 @@ export default function InboxClient() {
       correct: 0,
       wrong: 0,
       // ✅ เก็บกันซ้ำต่อข้ามเกม
-      recentHashes: (prev.recentHashes ?? []).slice(-300),
-      recentVerdicts: (prev.recentVerdicts ?? []).slice(-120),
-      redFlagsSeen: (prev.redFlagsSeen ?? []).slice(-200),
+      recentHashes: (prev.recentHashes ?? []).slice(-600),
+      recentVerdicts: (prev.recentVerdicts ?? []).slice(-200),
+      redFlagsSeen: (prev.redFlagsSeen ?? []).slice(-400),
+      recentTexts: (prev.recentTexts ?? []).slice(-200), // ✅ เพิ่ม
     };
 
     setState(fresh);
@@ -209,9 +249,7 @@ export default function InboxClient() {
     if (didInit.current) return;
     didInit.current = true;
 
-    const isNew =
-      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
-
+    const isNew = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
     if (isNew) {
       resetLocal();
       return;
@@ -231,13 +269,14 @@ export default function InboxClient() {
 
     setState((prev) => {
       const next: InboxState = {
+        ...prev,
         score: prev.score + (isCorrect ? pointsPerCorrect : 0),
         answered: prev.answered + 1,
         correct: prev.correct + (isCorrect ? 1 : 0),
         wrong: prev.wrong + (isCorrect ? 0 : 1),
-        recentHashes: prev.recentHashes ?? [],
         recentVerdicts: [...(prev.recentVerdicts ?? []), (item as any).verdict].slice(-200),
         redFlagsSeen: [...(prev.redFlagsSeen ?? []), ...(((item as any).redFlags ?? []) as string[])].slice(-400),
+        // recentHashes/recentTexts เก็บตอน acceptItem แล้ว ไม่ต้องซ้ำ
       };
       stateRef.current = next;
       saveState(next);
