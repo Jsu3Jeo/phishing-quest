@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { QuizCard, type Quiz } from "@/components/QuizCard";
-import { sha256 } from "@/lib/utils";
 
 type GameState = {
   score: number;
@@ -12,7 +11,7 @@ type GameState = {
   wrong: number;
   historySignals: string[];
   historyStems: string[];
-  recentHashes: string[];
+  recentHashes: string[]; // ยังเก็บไว้ได้ แต่ไม่ใช้กันซ้ำแล้ว
 };
 
 const STORAGE_KEY = "pq_game_v2";
@@ -45,27 +44,12 @@ function saveState(s: GameState) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
 }
 
-function normalizeText(s: string) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
-/** ✅ hash แบบ stable (ไม่ขึ้นกับลำดับตัวเลือก) */
-function computeClientHash(q: Quiz) {
-  const stem = normalizeText((q as any)?.stem).toLowerCase();
-  const opts = (q?.options ?? [])
-    .map((o) => normalizeText(o.text).toLowerCase())
-    .sort();
-  return sha256(stem + "\n" + opts.join("\n"));
-}
-
-/** ✅ แปลงข้อมูลจาก API ให้ตรงกับ QuizCard type เสมอ (ใช้ whyCorrect) */
+/** ✅ แปลงข้อมูลจาก API ให้ตรงกับ QuizCard type เสมอ */
 function coerceToUiQuiz(raw: any): Quiz {
   const stem = String(raw?.stem ?? "");
   const options = Array.isArray(raw?.options) ? raw.options : [];
   const signals = Array.isArray(raw?.signals) ? raw.signals.map(String) : [];
-  const whyCorrect = String(
-    raw?.whyCorrect ?? "สรุป: ตรวจโดเมน/ลิงก์ทางการ และอย่าให้ข้อมูลสำคัญ"
-  );
+  const whyCorrect = String(raw?.whyCorrect ?? "สรุป: ตรวจโดเมน/ลิงก์ทางการ และอย่าให้ข้อมูลสำคัญ");
 
   return {
     kind: "quiz",
@@ -114,9 +98,8 @@ export default function GameClient() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        answered: s.answered,
-        freshOnly: true,
-        recentHashes: (s.recentHashes ?? []).slice(-300),
+        answered: s.answered, // ✅ สำคัญ: ให้ server ใช้ answered % 20
+        // ไม่ต้อง freshOnly แล้ว ถ้าจะเล่นแบบ 20 ข้อวน
         recentSignals: (s.historySignals ?? []).slice(-60),
         recentStems: (s.historyStems ?? []).slice(-80),
       }),
@@ -124,42 +107,7 @@ export default function GameClient() {
 
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data?.error || "สร้างโจทย์ไม่สำเร็จ");
-
     return coerceToUiQuiz(data.quiz);
-  };
-
-  /** ✅ อัปเดต stateRef แบบ sync กัน race condition */
-  const pushHashSync = (hash: string) => {
-    if (!hash) return;
-
-    const cur = stateRef.current;
-    const next: GameState = {
-      ...cur,
-      recentHashes: [...(cur.recentHashes ?? []), hash].filter(Boolean).slice(-400),
-    };
-    stateRef.current = next;
-    setState(next);
-    saveState(next);
-  };
-
-  const acceptQuiz = (q: Quiz) => {
-    const h = (q as any)?.hash || computeClientHash(q);
-
-    // ✅ ถ้าโจทย์ซ้ำใน session: ไม่รับ
-    if ((stateRef.current.recentHashes ?? []).includes(h)) return false;
-
-    const fixed: Quiz = {
-      ...(q as any),
-      kind: "quiz",
-      hash: h,
-      whyCorrect:
-        (q as any)?.whyCorrect ||
-        "สรุป: ตรวจโดเมน/ลิงก์ทางการ และอย่าให้ข้อมูลสำคัญ",
-    };
-
-    setQuiz(fixed);
-    pushHashSync(h);
-    return true;
   };
 
   const fetchNext = async (sArg?: GameState) => {
@@ -173,36 +121,19 @@ export default function GameClient() {
     answeredRef.current = false;
 
     try {
-      // ✅ ถ้ามี prefetch แล้ว ใช้ก่อน (เร็วมาก)
+      // ✅ ใช้ prefetch ก่อน (เร็ว)
       if (prefetchedRef.current) {
         const q = prefetchedRef.current;
         prefetchedRef.current = null;
-
-        const ok = acceptQuiz(q);
-        if (!ok) {
-          // ถ้า prefetched ดันซ้ำ -> ไปยิงใหม่
-          // fall through
-        } else {
-          return;
-        }
+        setQuiz(q);
+        return;
       }
 
       const s = sArg ?? stateRef.current;
+      const q = await callNextApi(s);
 
-      // ✅ กันซ้ำฝั่ง client เพิ่ม: ถ้า API ดันส่งซ้ำ ให้ลองใหม่สั้นๆ
-      let got = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const q = await callNextApi(s);
-        if (acceptQuiz(q)) {
-          got = true;
-          break;
-        }
-      }
-
-      if (!got) {
-        setQuiz(null);
-        setErr("สุ่มได้โจทย์ซ้ำหลายครั้ง ลองกด “ลองใหม่” อีกที");
-      }
+      // ✅ รับมาใช้เลย ไม่กันซ้ำ (เพราะต้องวน 20 ข้อได้)
+      setQuiz(q);
     } catch (e: any) {
       setErr(e?.message || "เกิดข้อผิดพลาด");
       setQuiz(null);
@@ -220,11 +151,7 @@ export default function GameClient() {
     try {
       const s = stateRef.current;
       const q = await callNextApi(s);
-
-      const h = (q as any)?.hash || computeClientHash(q);
-      if ((stateRef.current.recentHashes ?? []).includes(h)) return;
-
-      prefetchedRef.current = { ...(q as any), hash: h };
+      prefetchedRef.current = q;
     } catch {
       prefetchedRef.current = null;
     } finally {
@@ -233,17 +160,14 @@ export default function GameClient() {
   };
 
   const resetLocal = async () => {
-    const prev = stateRef.current;
-
     const fresh: GameState = {
       score: 0,
       answered: 0,
       correct: 0,
       wrong: 0,
-      // ✅ เก็บกันซ้ำข้ามเกม (ตามที่คุณต้องการ)
-      historySignals: (prev.historySignals ?? []).slice(-120),
-      historyStems: (prev.historyStems ?? []).slice(-120),
-      recentHashes: (prev.recentHashes ?? []).slice(-400),
+      historySignals: [],
+      historyStems: [],
+      recentHashes: [],
     };
 
     setState(fresh);
@@ -266,8 +190,7 @@ export default function GameClient() {
     didInit.current = true;
 
     const isNew =
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("new") === "1";
+      typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1";
 
     if (isNew) {
       resetLocal();
